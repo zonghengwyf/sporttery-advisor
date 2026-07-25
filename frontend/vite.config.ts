@@ -12,6 +12,10 @@ export default defineConfig({
       '/api': {
         target: 'http://117.72.217.97:8000',
         changeOrigin: true,
+        configure: (proxy) => {
+          proxy.on('error', (err) => console.error('[proxy error]', err.message))
+          proxy.on('proxyReq', (_req, req) => console.log('[proxy]', req.method, req.url))
+        },
       },
     },
   },

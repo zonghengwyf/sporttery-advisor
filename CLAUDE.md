@@ -193,6 +193,13 @@ SourceManager 优先级：`竞彩 API Key → Playwright 爬虫 → Redis 缓存
 
 ## 开发规范
 
+### 前端设计规范（强制）
+- **所有前端页面改动必须同时调用 `design-taste-frontend` + `ui-ux-pro-max-skill` 两个技能**
+- 先用 `/design-taste-frontend` 输出 Design Read + 拨盘设定，再执行实现
+- 本项目 UI 基调：Data-Dense Dashboard，VARIANCE:5 / MOTION:2 / DENSITY:9
+- 禁止 AI 默认美学（紫色渐变、居中 Hero、三等分 feature 卡）
+- 图标统一用 SVG inline（项目已有约定），禁止 emoji 代替图标
+
 ### 语言
 - 回复中文
 - 代码注释简洁，仅注释"为什么"，不注释"是什么"
@@ -231,7 +238,8 @@ API_FOOTBALL_KEY=
 
 本项目整合两个现有项目：
 - `../china-sporttery-football-advisor/` — 竞彩决策规则 Skills（SKILL.md 等 5 个文件）
-- `../china-sporttery-football-advisor/football-prediction-skill/` — Dixon-Coles 统计模型参考实现
+- `../football-prediction-skill/` — Dixon-Coles 统计模型参考实现
+- `../sports-skills/`
 
 ## Skill routing
 

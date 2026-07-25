@@ -1,14 +1,16 @@
+import logging
 from datetime import date
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.auth import get_current_user
+from api.auth import get_current_user, require_admin
 from db.models import Match, Prediction, User
 from db.session import get_db
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -27,29 +29,43 @@ class MatchOut(BaseModel):
 
     model_config = {"from_attributes": True}
 
-    def model_post_init(self, __context):
-        self.kickoff_at = str(self.kickoff_at)
+    @field_validator("kickoff_at", mode="before")
+    @classmethod
+    def coerce_kickoff(cls, v):
+        return str(v)
 
 
 @router.get("/", response_model=list[MatchOut])
 async def list_matches(
     sale_date: str = Query(default=str(date.today())),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
 ):
     result = await db.execute(
-        select(Match)
-        .where(Match.sale_date == sale_date)
-        .order_by(Match.kickoff_at)
+        select(Match).where(Match.sale_date == sale_date).order_by(Match.kickoff_at)
     )
-    return result.scalars().all()
+    matches = result.scalars().all()
+
+    # 无数据时自动从竞彩官方接口拉取
+    if not matches:
+        try:
+            from core.data.sync import sync_daily_matches
+            target = date.fromisoformat(sale_date)
+            n = await sync_daily_matches(db, target)
+            if n > 0:
+                result = await db.execute(
+                    select(Match).where(Match.sale_date == sale_date).order_by(Match.kickoff_at)
+                )
+                matches = result.scalars().all()
+        except Exception as exc:
+            logger.warning("自动同步竞彩赛单失败：%s", exc)
+
+    return matches
 
 
 @router.get("/{match_id}", response_model=MatchOut)
 async def get_match(
     match_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
 ):
     result = await db.execute(select(Match).where(Match.id == match_id))
     match = result.scalar_one_or_none()
@@ -68,9 +84,9 @@ async def set_match_result(
     match_id: int,
     body: ResultIn,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin),
 ):
-    """录入比赛实际结果（H/D/A），同步写入 Match 和 DuckDB 回测记录。"""
+    """录入比赛实际结果（H/D/A），同步写入 Match 和 DuckDB 回测记录。仅管理员可操作。"""
     if body.actual_result not in ("H", "D", "A"):
         raise HTTPException(status_code=400, detail="actual_result 须为 H / D / A")
 
@@ -85,7 +101,7 @@ async def set_match_result(
     # 同步写 DuckDB 回测记录
     result = await db.execute(
         select(Prediction)
-        .where(Prediction.match_id == match_id)  # type: ignore[attr-defined]
+        .where(Prediction.match_id == match_id)
         .order_by(Prediction.created_at.desc())
         .limit(1)
     )
@@ -99,11 +115,11 @@ async def set_match_result(
                 match_id=match_id,
                 predicted=pred.fused_probs or pred.stat_probs,
                 actual=body.actual_result,
+                user_id=pred.user_id or 0,
             )
             snap.close()
         except Exception as exc:
-            import logging
-            logging.getLogger(__name__).warning("DuckDB 回测写入失败: %s", exc)
+            logger.warning("DuckDB 回测写入失败: %s", exc)
 
     await db.commit()
     return {"match_id": match_id, "actual_result": body.actual_result, "actual_score": body.actual_score}
@@ -115,10 +131,15 @@ async def trigger_sync(
     sale_date: str = Query(default=str(date.today())),
     current_user: User = Depends(get_current_user),
 ):
-    """手动触发赛单同步（管理员或普通用户均可）。"""
-    from workers.tasks import run_daily_sync
-    from datetime import date as _date
+    """手动触发赛单同步（登录用户均可）。"""
+    from core.data.sync import sync_daily_matches
+    from db.session import AsyncSessionLocal
 
-    target = _date.fromisoformat(sale_date)
-    background_tasks.add_task(run_daily_sync, target)
+    target = date.fromisoformat(sale_date)
+
+    async def _bg():
+        async with AsyncSessionLocal() as session:
+            await sync_daily_matches(session, target)
+
+    background_tasks.add_task(_bg)
     return {"message": f"已触发 {sale_date} 赛单同步，后台执行中"}

@@ -11,9 +11,12 @@ interface Match {
   home_team: string
   away_team: string
   league: string
-  kickoff_at: string          // backend field name
+  kickoff_at: string
   sale_date: string
-  sporttery_odds: { home: number; draw: number; away: number } | null
+  sporttery_odds: {
+    home: number; draw: number; away: number
+    hhad?: { home: number; draw: number; away: number; handicap: number | null }
+  } | null
   overseas_odds: Record<string, number> | null
   is_tournament: boolean
 }
@@ -29,24 +32,30 @@ const matches = ref<Match[]>([])
 const predictions = ref<Record<number, BatchPrediction>>({})
 const loading = ref(true)
 const syncing = ref(false)
-const selectedDate = ref(new Date().toISOString().split('T')[0])
+
+function localDate(offset = 0) {
+  const d = new Date()
+  d.setDate(d.getDate() + offset)
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+const selectedDate = ref(localDate())
 
 const dates = computed(() => {
-  const list = []
-  for (let i = -1; i <= 3; i++) {
+  return [-1, 0, 1].map(offset => {
     const d = new Date()
-    d.setDate(d.getDate() + i)
-    list.push({
-      label: formatDateLabel(d),
-      value: d.toISOString().split('T')[0],
-    })
-  }
-  return list
+    d.setDate(d.getDate() + offset)
+    return {
+      label: formatDateLabel(d, offset),
+      value: localDate(offset),
+    }
+  })
 })
 
-function formatDateLabel(d: Date) {
+function formatDateLabel(d: Date, offset: number) {
   const days = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
-  return `${days[d.getDay()]} ${d.getMonth() + 1}/${d.getDate()}`
+  const prefix = offset === 0 ? '今天' : offset === -1 ? '昨天' : offset === 1 ? '明天' : days[d.getDay()]
+  return `${prefix} ${d.getMonth() + 1}/${d.getDate()}`
 }
 
 const todayStats = computed(() => {
@@ -116,22 +125,7 @@ onMounted(load)
 
 <template>
   <div class="view">
-    <!-- Page header -->
-    <header class="page-header flex items-center justify-between">
-      <div>
-        <h1 class="page-title">今日赛事</h1>
-        <p class="page-sub">{{ selectedDate }} · {{ todayStats.total }} 场竞彩赛事</p>
-      </div>
-      <button class="btn btn-ghost btn-sm" :disabled="syncing" @click="syncMatches">
-        <svg v-if="!syncing" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
-          <path d="M14 8A6 6 0 0 1 2.5 12M2 8a6 6 0 0 1 11.5-4M2 4v4h4M14 12v-4h-4"/>
-        </svg>
-        <span v-if="syncing">同步中…</span>
-        <span v-else>同步</span>
-      </button>
-    </header>
-
-    <!-- Date strip -->
+    <!-- Date strip with sync -->
     <div class="date-strip">
       <button
         v-for="d in dates"
@@ -142,21 +136,24 @@ onMounted(load)
       >
         {{ d.label }}
       </button>
+      <button class="btn btn-ghost btn-sm" style="margin-left:auto;flex-shrink:0" :disabled="syncing" @click="syncMatches">
+        <svg v-if="!syncing" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M14 8A6 6 0 0 1 2.5 12M2 8a6 6 0 0 1 11.5-4M2 4v4h4M14 12v-4h-4"/>
+        </svg>
+        <span v-if="syncing">同步中…</span>
+        <span v-else>同步</span>
+      </button>
     </div>
 
     <!-- Stats row -->
     <div class="stats-row">
-      <div class="stat-item card no-accent p-3" style="text-align:center">
-        <div class="stat-val" style="color:var(--primary)">{{ todayStats.total }}</div>
+      <div class="stat-item card no-accent p-3">
+        <div class="stat-val text-primary">{{ todayStats.total }}</div>
         <div class="stat-label">今日场次</div>
       </div>
-      <div class="stat-item card no-accent p-3" style="text-align:center">
-        <div class="stat-val" style="color:var(--green)">{{ todayStats.analyzed }}</div>
+      <div class="stat-item card no-accent p-3">
+        <div class="stat-val text-green">{{ todayStats.analyzed }}</div>
         <div class="stat-label">已分析</div>
-      </div>
-      <div class="stat-item card no-accent p-3" style="text-align:center">
-        <div class="stat-val" style="color:var(--gold)">68%</div>
-        <div class="stat-label">近7日胜率</div>
       </div>
     </div>
 
@@ -167,7 +164,7 @@ onMounted(load)
 
     <!-- Empty -->
     <div v-else-if="!matches.length" class="empty-tip">
-      <p class="font-disp" style="font-size:18px;color:var(--text3)">No Fixtures</p>
+      <p class="empty-title">暂无赛事</p>
       <p class="text-sm text-muted mt-2">点击同步按钮拉取今日赛单</p>
     </div>
 
@@ -182,7 +179,6 @@ onMounted(load)
         <!-- Card head: league + time + badge -->
         <div class="card-head flex items-center justify-between">
           <div class="flex items-center gap-1">
-            <span class="league-dot" />
             <span class="text-xs text-muted font-disp">{{ m.league }}</span>
           </div>
           <div class="flex items-center gap-2">
@@ -204,7 +200,7 @@ onMounted(load)
             <div class="text-xs text-muted">主场</div>
           </div>
           <div class="vs-sep font-disp">VS</div>
-          <div class="team-col" style="align-items:flex-end">
+          <div class="team-col">
             <div class="team-name">{{ m.away_team }}</div>
             <div class="text-xs text-muted">客场</div>
           </div>
@@ -217,19 +213,38 @@ onMounted(load)
           </div>
         </div>
 
-        <!-- Odds from sporttery_odds dict -->
-        <div class="odds-row" v-if="homeOdds(m)">
-          <div class="odd-item">
-            <span class="odd-label">主胜</span>
-            <span class="odd-val win">{{ homeOdds(m)?.toFixed(2) }}</span>
+        <!-- Odds: 胜平负 + 让球 -->
+        <div v-if="homeOdds(m)" class="odds-section">
+          <div class="odds-row">
+            <div class="odd-item">
+              <span class="odd-label">主胜</span>
+              <span class="odd-val win">{{ homeOdds(m)?.toFixed(2) }}</span>
+            </div>
+            <div class="odd-item">
+              <span class="odd-label">平局</span>
+              <span class="odd-val draw">{{ drawOdds(m)?.toFixed(2) }}</span>
+            </div>
+            <div class="odd-item">
+              <span class="odd-label">客胜</span>
+              <span class="odd-val lose">{{ awayOdds(m)?.toFixed(2) }}</span>
+            </div>
           </div>
-          <div class="odd-item">
-            <span class="odd-label">平局</span>
-            <span class="odd-val draw">{{ drawOdds(m)?.toFixed(2) }}</span>
-          </div>
-          <div class="odd-item">
-            <span class="odd-label">客胜</span>
-            <span class="odd-val lose">{{ awayOdds(m)?.toFixed(2) }}</span>
+          <div v-if="m.sporttery_odds?.hhad" class="odds-row hhad-row">
+            <div class="odd-item">
+              <span class="odd-label">让球</span>
+              <span class="odd-label-handicap">
+                {{ m.sporttery_odds.hhad.handicap != null ? (m.sporttery_odds.hhad.handicap > 0 ? '+' : '') + m.sporttery_odds.hhad.handicap : '' }}
+              </span>
+            </div>
+            <div class="odd-item">
+              <span class="odd-val win">{{ m.sporttery_odds.hhad.home.toFixed(2) }}</span>
+            </div>
+            <div class="odd-item">
+              <span class="odd-val draw">{{ m.sporttery_odds.hhad.draw.toFixed(2) }}</span>
+            </div>
+            <div class="odd-item">
+              <span class="odd-val lose">{{ m.sporttery_odds.hhad.away.toFixed(2) }}</span>
+            </div>
           </div>
         </div>
         <div v-else class="odds-row">
@@ -238,7 +253,7 @@ onMounted(load)
 
         <!-- Consensus badge (from batch prediction) -->
         <div v-if="predictions[m.id]?.consensus" class="ai-snippet">
-          <div class="chat-avatar" style="font-size:10px;width:22px;height:22px">AI</div>
+          <div class="chat-avatar chat-avatar--sm">AI</div>
           <div class="ai-snip-text">模型共识：{{ predictions[m.id].consensus }} · 点击查看完整分析</div>
         </div>
       </div>
@@ -251,6 +266,7 @@ onMounted(load)
 
 .date-strip {
   display: flex;
+  align-items: center;
   gap: 6px;
   padding: 10px 16px;
   border-bottom: var(--card-bd);
@@ -281,7 +297,7 @@ onMounted(load)
   padding: 12px 16px;
   border-bottom: var(--card-bd);
 }
-.stat-item { flex: 1; }
+.stat-item { flex: 1; text-align: center; }
 
 .match-list {
   flex: 1;
@@ -303,13 +319,6 @@ onMounted(load)
 .card-head {
   padding: 10px 14px 0;
 }
-.league-dot {
-  width: 6px; height: 6px;
-  border-radius: 50%;
-  background: var(--primary);
-  display: inline-block;
-}
-
 .teams-row {
   display: flex;
   align-items: center;
@@ -335,8 +344,16 @@ onMounted(load)
   flex-shrink: 0;
 }
 
-.ai-snippet {
-  display: flex;
+.odds-section { display: flex; flex-direction: column; }
+.hhad-row { border-top: 1px solid var(--line); padding-top: 6px; opacity: .85; }
+.odd-label-handicap {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--primary);
+  font-family: var(--font-num);
+}
+
+.ai-snippet {  display: flex;
   align-items: flex-start;
   gap: 8px;
   padding: 0 14px 12px;

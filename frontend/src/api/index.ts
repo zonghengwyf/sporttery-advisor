@@ -16,11 +16,9 @@ api.interceptors.response.use(
   (err) => {
     if (err.response?.status === 401) {
       localStorage.removeItem('token')
-      // Only force login for write operations (POST/PUT/DELETE/PATCH)
-      // GET requests just show empty state — no forced redirect
-      const method = (err.config?.method ?? 'get').toUpperCase()
-      if (method !== 'GET') {
-        window.location.href = '/login'
+      const protectedPaths = ['/settings', '/chat']
+      if (protectedPaths.some(p => window.location.pathname.startsWith(p))) {
+        window.location.href = `/login?redirect=${encodeURIComponent(window.location.pathname)}`
       }
     }
     return Promise.reject(err)

@@ -97,6 +97,7 @@ class Prediction(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     match_id: Mapped[int] = mapped_column(ForeignKey("matches.id"), nullable=False)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     run_id: Mapped[str] = mapped_column(String(50), nullable=False)  # 每次分析批次 ID
     stat_probs: Mapped[dict | None] = mapped_column(JSON)    # 主要来源原始概率（DC/Elo/市场）
     fused_probs: Mapped[dict | None] = mapped_column(JSON)   # 多源融合 + 情报调整后概率

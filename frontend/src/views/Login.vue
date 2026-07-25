@@ -13,15 +13,18 @@ const loading = ref(false)
 const error = ref('')
 
 async function submit() {
-  if (!username.value || !password.value) return
+  if (!username.value) { error.value = '请输入用户名'; return }
+  if (!password.value) { error.value = '请输入密码'; return }
   loading.value = true
   error.value = ''
   try {
     await auth.login(username.value, password.value)
     const redirect = (route.query.redirect as string) || '/analysis'
     router.push(redirect)
-  } catch {
-    error.value = '用户名或密码错误'
+  } catch (e: any) {
+    console.error('[login]', e)
+    const msg = e?.response?.data?.detail
+    error.value = msg ? String(msg) : '用户名或密码错误'
   } finally {
     loading.value = false
   }
@@ -32,8 +35,8 @@ async function submit() {
   <div class="login-wrap">
     <div class="login-card card no-accent">
       <div class="login-head">
-        <div class="sidebar-logo-mark" style="font-size:24px">JCCC</div>
-        <div class="sidebar-logo-sub mt-2" style="font-size:13px">竞彩智能顾问 — 请登录以继续</div>
+        <div class="login-logo">JCCC</div>
+        <div class="text-sm text-muted mt-2">竞彩智能顾问，请登录以继续</div>
       </div>
 
       <form @submit.prevent="submit" class="login-form">
@@ -56,7 +59,7 @@ async function submit() {
 
 <style scoped>
 .login-wrap {
-  min-height: 100vh;
+  min-height: 100dvh;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -69,5 +72,14 @@ async function submit() {
   padding: 32px;
 }
 .login-head { margin-bottom: 24px; }
+.login-logo {
+  font-family: var(--font-disp);
+  font-size: 28px;
+  font-weight: 800;
+  letter-spacing: .5px;
+  color: var(--text);
+  text-transform: uppercase;
+  line-height: 1;
+}
 .login-form .field:last-of-type { margin-bottom: 20px; }
 </style>

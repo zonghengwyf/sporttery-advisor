@@ -20,4 +20,18 @@ const router = createRouter({
   ],
 })
 
+router.beforeEach((to, _from, next) => {
+  const token = localStorage.getItem('token')
+  const protectedPaths = ['/settings', '/chat']
+  const needsAuth = protectedPaths.some(p => to.path.startsWith(p))
+
+  if (to.path === '/login' && token) {
+    next('/analysis')
+  } else if (needsAuth && !token) {
+    next(`/login?redirect=${encodeURIComponent(to.fullPath)}`)
+  } else {
+    next()
+  }
+})
+
 export default router

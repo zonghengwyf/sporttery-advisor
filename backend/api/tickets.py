@@ -3,8 +3,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.auth import get_current_user
-from db.models import Match, Prediction, User
+from db.models import Prediction
 from db.session import get_db
 
 router = APIRouter()
@@ -27,7 +26,6 @@ class TicketsOut(BaseModel):
 async def generate_tickets(
     req: TicketsRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
 ):
     predictions = []
     for mid in req.match_ids:
@@ -44,7 +42,6 @@ async def generate_tickets(
     if not predictions:
         raise HTTPException(status_code=404, detail="所选比赛暂无预测数据，请先运行分析")
 
-    # 合并多场预测的票型
     budget = req.budget or 100.0
     from core.tickets.generator import TicketGenerator
     generator = TicketGenerator()
@@ -56,7 +53,6 @@ async def generate_tickets(
 async def get_match_tickets(
     match_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
 ):
     """获取单场比赛的原始票型数据（含 raw_analysis）。"""
     result = await db.execute(

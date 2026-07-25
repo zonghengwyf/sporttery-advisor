@@ -7,19 +7,11 @@ const route = useRoute()
 const auth = useAuthStore()
 
 const nav = [
-  { path: '/analysis', label: '今日赛事' },
-  { path: '/tickets',  label: '投注方案' },
+  { path: '/analysis', label: '赛事' },
+  { path: '/tickets',  label: '方案' },
   { path: '/chat',     label: 'AI 分析' },
-  { path: '/backtest', label: '回测报告' },
+  { path: '/backtest', label: '回测' },
   { path: '/settings', label: '设置' },
-]
-
-const mobileNav = [
-  { path: '/analysis', label: '赛事',  icon: `<rect x="2" y="2" width="7" height="7" rx="1.5"/><rect x="11" y="2" width="7" height="7" rx="1.5"/><rect x="2" y="11" width="7" height="7" rx="1.5"/><rect x="11" y="11" width="7" height="7" rx="1.5"/>` },
-  { path: '/tickets',  label: '方案',  icon: `<rect x="3" y="3" width="14" height="14" rx="2"/><path d="M7 10h6M7 7h6M7 13h4"/>` },
-  { path: '/chat',     label: 'AI',    icon: `<circle cx="10" cy="10" r="8"/><path d="M6.5 10h7M10 7v6"/>` },
-  { path: '/backtest', label: '回测',  icon: `<path d="M3 16l5-10 4 8 3-5 4 7"/>` },
-  { path: '/settings', label: '设置',  icon: `<circle cx="10" cy="7" r="3"/><path d="M3 18c0-4 3.1-7 7-7s7 3 7 7"/>` },
 ]
 
 function isActive(path: string) {
@@ -28,7 +20,6 @@ function isActive(path: string) {
 </script>
 
 <template>
-  <!-- 报纸报头导航 -->
   <header class="masthead">
     <div class="mh-inner">
       <div class="mh-logo" @click="router.push('/analysis')">
@@ -37,14 +28,16 @@ function isActive(path: string) {
         <span class="mh-name">竞彩顾问</span>
       </div>
 
-      <nav class="mh-nav">
-        <span
+      <!-- PC inline pill nav (hidden on mobile) -->
+      <nav class="mh-nav" aria-label="桌面端导航">
+        <button
           v-for="item in nav"
           :key="item.path"
+          type="button"
           class="mh-link"
           :class="{ active: isActive(item.path) }"
           @click="router.push(item.path)"
-        >{{ item.label }}</span>
+        >{{ item.label }}</button>
       </nav>
 
       <div class="mh-actions">
@@ -55,22 +48,42 @@ function isActive(path: string) {
     </div>
   </header>
 
-  <!-- 内容 -->
+  <!-- Content -->
   <main class="main-area">
     <RouterView />
   </main>
 
-  <!-- 移动端底导 -->
-  <nav class="bottom-nav">
-    <div
-      v-for="item in mobileNav"
+  <!-- Mobile bottom nav (hidden on PC) -->
+  <nav class="bottom-nav" aria-label="移动端导航">
+    <button
+      v-for="item in nav"
       :key="item.path"
+      type="button"
       class="bn-item"
-      :class="{ active: isActive(item.path) }"
+      :class="{ active: isActive(item.path), 'bn-item--center': item.path === '/chat' }"
       @click="router.push(item.path)"
     >
-      <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" v-html="item.icon" />
-      {{ item.label }}
-    </div>
+      <span v-if="item.path === '/chat'" class="bn-fab" :class="{ active: isActive(item.path) }">
+        <svg width="24" height="24" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M10 2l1.8 5.2 5.2 1.8-5.2 1.8L10 16.5l-1.8-5.2-5.2-1.8 5.2-1.8Z"/>
+        </svg>
+      </span>
+      <svg v-else-if="item.path === '/analysis'" width="22" height="22" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect x="2" y="2" width="7" height="7" rx="1.5"/><rect x="11" y="2" width="7" height="7" rx="1.5"/>
+        <rect x="2" y="11" width="7" height="7" rx="1.5"/><rect x="11" y="11" width="7" height="7" rx="1.5"/>
+      </svg>
+      <svg v-else-if="item.path === '/tickets'" width="22" height="22" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect x="3" y="3" width="14" height="14" rx="2"/><path d="M7 10h6M7 7h6M7 13h4"/>
+      </svg>
+      <svg v-else-if="item.path === '/backtest'" width="22" height="22" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M3 15l4-8 3.5 7 3-5 3.5 6"/>
+      </svg>
+      <svg v-else-if="item.path === '/settings'" width="22" height="22" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="10" cy="10" r="2.5"/>
+        <path d="M10 2v2M10 16v2M2 10h2M16 10h2M4.22 4.22l1.42 1.42M14.36 14.36l1.42 1.42M4.22 15.78l1.42-1.42M14.36 5.64l1.42-1.42"/>
+      </svg>
+      <span v-if="item.path !== '/chat'">{{ item.label }}</span>
+      <span v-else class="bn-fab-label">{{ item.label }}</span>
+    </button>
   </nav>
 </template>

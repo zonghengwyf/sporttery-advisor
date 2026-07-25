@@ -43,25 +43,21 @@ async def _get_snapshot_manager():
 
 
 async def run_daily_sync(sync_date: Optional[date] = None):
-    """同步竞彩赛单 + 海外赔率 → PostgreSQL + DuckDB 快照."""
+    """同步竞彩赛单 → PostgreSQL."""
     target_date = sync_date or date.today()
     logger.info("开始同步赛单：%s", target_date)
 
-    session        = await _get_db_session()
-    source_manager = await _get_source_manager()
-    snapshot_mgr   = await _get_snapshot_manager()
+    from db.session import AsyncSessionLocal
+    from core.data.sync import sync_daily_matches
 
-    try:
-        from core.data.sync import sync_daily_matches
-        n = await sync_daily_matches(session, source_manager, snapshot_mgr, target_date)
-        logger.info("赛单同步完成：%s，共 %d 场", target_date, n)
-        return n
-    except Exception as exc:
-        logger.error("赛单同步失败：%s", exc, exc_info=True)
-        raise
-    finally:
-        await session.close()
-        snapshot_mgr.close()
+    async with AsyncSessionLocal() as session:
+        try:
+            n = await sync_daily_matches(session, target_date)
+            logger.info("赛单同步完成：%s，共 %d 场", target_date, n)
+            return n
+        except Exception as exc:
+            logger.error("赛单同步失败：%s", exc, exc_info=True)
+            raise
 
 
 async def run_daily_analysis(analysis_date: Optional[date] = None):

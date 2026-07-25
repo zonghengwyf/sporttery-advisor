@@ -105,15 +105,10 @@ onMounted(loadMatches)
 
 <template>
   <div class="view">
-    <header class="page-header">
-      <h1 class="page-title">AI 分析</h1>
-      <p class="page-sub">流式对话 · 深度追问</p>
-    </header>
-
     <!-- Match selector -->
     <div class="match-sel-bar">
-      <span class="section-label" style="margin:0;white-space:nowrap">比赛</span>
-      <select v-model="selectedMatch" class="input" style="max-width:280px;font-size:12px;padding:5px 10px">
+      <label class="field-label" for="match-sel" style="margin:0;white-space:nowrap">比赛</label>
+      <select id="match-sel" v-model="selectedMatch" class="input" style="max-width:280px;font-size:12px;padding:5px 10px">
         <option v-for="m in matches" :key="m.id" :value="m.id">
           {{ m.home_team }} vs {{ m.away_team }}
         </option>
@@ -123,8 +118,8 @@ onMounted(loadMatches)
     <!-- Messages -->
     <div class="messages" ref="chatEl">
       <div v-if="!messages.length" class="chat-empty">
-        <div class="chat-avatar" style="width:36px;height:36px;font-size:14px;margin:0 auto 12px">AI</div>
-        <p class="font-disp" style="font-size:16px;color:var(--text3)">Start Asking</p>
+        <div class="chat-avatar chat-avatar--lg mb-3">AI</div>
+        <p class="empty-title">开始提问</p>
         <p class="text-sm text-muted mt-2">就本场赛事进行 AI 深度分析</p>
       </div>
 

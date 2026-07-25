@@ -88,7 +88,7 @@ async function saveDS(cfg: DSConfig) {
 
 function addLLM() {
   llmConfigs.value.push({
-    name: 'New Config',
+    name: '新配置',
     provider: 'openai',
     model: '',
     api_key: '',
@@ -102,11 +102,6 @@ onMounted(load)
 
 <template>
   <div class="view">
-    <header class="page-header">
-      <h1 class="page-title">系统设置</h1>
-      <p class="page-sub">LLM 配置 & 数据源管理</p>
-    </header>
-
     <div v-if="loading" class="p-5">
       <div class="skeleton" style="height:160px;margin-bottom:12px" />
       <div class="skeleton" style="height:160px" />
@@ -157,7 +152,7 @@ onMounted(load)
             <span
               v-if="cfg.id && testResult[cfg.id]"
               class="text-xs"
-              :style="testResult[cfg.id].startsWith('✓') ? 'color:var(--green)' : 'color:var(--primary)'"
+              :class="testResult[cfg.id].startsWith('✓') ? 'text-green' : 'text-primary'"
             >
               {{ testResult[cfg.id] }}
             </span>
@@ -225,11 +220,15 @@ onMounted(load)
   flex: 1;
   font-weight: 600;
   border: none;
+  border-bottom: 1px solid var(--line);
   background: transparent;
-  padding: 0;
+  padding: 0 0 2px;
   font-size: 13px;
+  outline: none;
+  transition: border-color .15s;
 }
-.cfg-name-input:focus { outline: none; border-bottom: 1px solid var(--primary); }
+.cfg-name-input:hover { border-bottom-color: var(--text3); }
+.cfg-name-input:focus { border-bottom-color: var(--primary); }
 
 .cfg-grid {
   display: grid;
