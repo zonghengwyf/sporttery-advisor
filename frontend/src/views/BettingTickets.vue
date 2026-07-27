@@ -223,7 +223,15 @@ onMounted(async () => {
       <div class="empty-title">今日投注方案</div>
       <div class="empty-sub">
         <strong>{{ totalMatchCount > 0 ? `${totalMatchCount} 场赛事` : '今日赛事' }}</strong>
-        已就绪 · AI 三模型筛选<br>稳健 / 均衡 / 博高赔 / 比分 四套方案
+        已就绪 · AI 三模型筛选
+      </div>
+
+      <!-- Scheme type preview pills -->
+      <div class="scheme-preview-row">
+        <span class="scheme-pill scheme-pill--safe">稳健 <span class="pill-risk">低风险</span></span>
+        <span class="scheme-pill scheme-pill--bal">均衡 <span class="pill-risk">中风险</span></span>
+        <span class="scheme-pill scheme-pill--hi">博高赔 <span class="pill-risk">高风险</span></span>
+        <span class="scheme-pill scheme-pill--sc">比分 <span class="pill-risk">极高</span></span>
       </div>
 
       <button class="gen-all-btn" @click="generateAll">
@@ -446,8 +454,8 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
-  padding: 40px 24px 80px;
+  justify-content: flex-start;
+  padding: 48px 24px 80px;
   text-align: center;
   gap: 0;
 }
@@ -484,12 +492,37 @@ onMounted(async () => {
 }
 .empty-sub {
   font-size: 12px;
-  color: var(--text3);
+  color: var(--text2);
   line-height: 1.65;
   max-width: 260px;
-  margin-bottom: 28px;
+  margin-bottom: 16px;
 }
 .empty-sub strong { color: var(--primary); font-weight: 700; }
+
+/* Scheme type preview */
+.scheme-preview-row {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+  justify-content: center;
+  margin-bottom: 24px;
+}
+.scheme-pill {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  font-family: var(--font-disp);
+  letter-spacing: .2px;
+}
+.scheme-pill--safe { background: color-mix(in srgb, var(--green, #22c55e) 10%, transparent); color: var(--green, #22c55e); }
+.scheme-pill--bal  { background: color-mix(in srgb, #3b82f6 10%, transparent); color: #3b82f6; }
+.scheme-pill--hi   { background: color-mix(in srgb, #f59e0b 10%, transparent); color: #d97706; }
+.scheme-pill--sc   { background: color-mix(in srgb, #ef4444 10%, transparent); color: #ef4444; }
+.pill-risk { font-size: 9px; font-weight: 400; opacity: .8; font-family: var(--font); }
 
 .gen-all-btn {
   display: flex;
@@ -498,7 +531,7 @@ onMounted(async () => {
   padding: 13px 28px;
   background: var(--primary);
   color: #fff;
-  border-radius: 10px;
+  border-radius: 6px;
   font-size: 15px;
   font-weight: 700;
   font-family: var(--font-disp);
