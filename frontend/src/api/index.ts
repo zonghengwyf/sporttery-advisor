@@ -2,7 +2,7 @@ import axios from 'axios'
 
 const api = axios.create({
   baseURL: '/api',
-  timeout: 30000,
+  timeout: 60000,
 })
 
 api.interceptors.request.use((config) => {
@@ -16,10 +16,7 @@ api.interceptors.response.use(
   (err) => {
     if (err.response?.status === 401) {
       localStorage.removeItem('token')
-      const protectedPaths = ['/settings', '/chat']
-      if (protectedPaths.some(p => window.location.pathname.startsWith(p))) {
-        window.location.href = `/login?redirect=${encodeURIComponent(window.location.pathname)}`
-      }
+      window.location.href = `/login?redirect=${encodeURIComponent(window.location.pathname)}`
     }
     return Promise.reject(err)
   }

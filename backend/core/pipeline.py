@@ -25,8 +25,14 @@ from config import get_settings
 from core.llm.client import LLMClient
 from core.llm.client import LLMConfig as ClientLLMConfig
 from core.llm.skills_injector import MatchContext, SkillsInjector
+from core.modeling.factor_scorer import (
+    AbnormalResultType,
+    FactorScores,
+    TournamentRisk,
+    score_match,
+)
 from core.modeling.fusion import FusedProbs, PredictionFusion
-from core.modeling.odds import remove_vig
+from core.modeling.odds import remove_vig, select_devig_method
 from core.tickets.generator import TicketGenerator
 
 logger = logging.getLogger(__name__)
@@ -57,7 +63,20 @@ _STRUCTURED_JSON_INSTRUCTION = """
   "high_odds_pick": {"market": "胜平负", "picks": ["平"], "note": "冷门覆盖"},
   "scoreline_picks": ["2-0", "3-0", "2-1"],
   "intel_adjustment": {"home": 0.0, "draw": 0.0, "away": 0.0},
-  "skip_conditions": "临场主力缺阵则跳过"
+  "skip_conditions": "临场主力缺阵则跳过",
+  "factor_scores": {
+    "team_strength": 65,
+    "recent_form": 60,
+    "availability": 70,
+    "tactical_matchup": 55,
+    "schedule_venue": 50,
+    "motivation": 60,
+    "odds_market": 58,
+    "psychological": 50
+  },
+  "abnormal_result": "none",
+  "tournament_risk": "low",
+  "upset_flags": []
 }
 ```
 
@@ -65,6 +84,13 @@ _STRUCTURED_JSON_INSTRUCTION = """
 - risk_label: mainline（稳健主推）/ guarded（谨慎）/ upset_cover（冷门覆盖）/ avoid（建议跳过）
 - confidence: 0–100 整数，你对主推结果的把握程度
 - intel_adjustment: 概率调整量，正数增加该结果概率，三项之和应接近 0
+- factor_scores: 8 个因素的 0–100 评分（50 = 中性，>50 = 有利于投注方向）
+- abnormal_result: none / control_scoring / favorite_poor_form / underdog_strength / tactical_mismatch / variance / tournament_pattern
+- tournament_risk: low / medium / high（大赛控分/轮换风险等级）
+- upset_flags: 触发的爆冷风险标志列表，可选值见下方
+  可用标志：missing_creator, missing_striker, missing_gk, failed_weak_opp,
+            underdog_structure, qualified_rotate, mutual_draw_benefit,
+            low_block_weakness, adverse_conditions, odds_drift_against, poor_sporttery_value
 """
 
 
@@ -81,6 +107,7 @@ class MatchAnalysisResult:
     llm_provider: str
     llm_model: str
     raw_analysis: str = ""
+    factor_analysis: dict | None = None  # FactorScorerResult serialized
 
 
 class DailyPipeline:
@@ -89,7 +116,9 @@ class DailyPipeline:
         self.skills_injector = SkillsInjector()
         self.fusion = PredictionFusion()
         self.ticket_gen = TicketGenerator()
-        self._dc_params = None  # lazy-load from disk
+        self._dc_params = None      # lazy-load from disk
+        self._devig_method = None   # cached, re-evaluated each daily run
+        self._snap = None           # SnapshotManager, lazy-init in async context
 
     # ── 公开接口 ─────────────────────────────────────────────────────────────
 
@@ -111,6 +140,16 @@ class DailyPipeline:
             if not matches:
                 logger.info("今日无赛事：%s", target_date)
                 return {"analyzed": 0, "errors": 0}
+
+            # 每次每日运行时从 DuckDB 重新选最优去水差方法
+            try:
+                snap = await self._get_snap()
+                hist = await snap.get_devig_historical(limit=60)
+                self._devig_method = select_devig_method(hist)
+                logger.info("去水差方法自动选择：%s（基于 %d 条历史）", self._devig_method, len(hist))
+            except Exception as e:
+                self._devig_method = "power"
+                logger.debug("去水差方法选择失败，降级 power：%s", e)
 
             run_id = str(uuid.uuid4())[:8]
             analyzed = errors = 0
@@ -169,8 +208,22 @@ class DailyPipeline:
         # 计算期望赔值 EV = 模型概率 × 竞彩赔率 - 1
         fused_probs = _compute_ev(fused_probs, match.sporttery_odds)
 
+        # FactorScorer：将 LLM 因素评分转化为结构化置信度
+        factor_result = _run_factor_scorer(llm_result)
+        if factor_result:
+            effective_risk_label = factor_result.risk_label.value
+            effective_confidence = factor_result.final_confidence / 100.0
+        else:
+            effective_risk_label = llm_result.get("risk_label", "guarded")
+            effective_confidence = float(llm_result.get("confidence", 50)) / 100.0
+
+        # 将 FactorScorer 结论反写入 llm_result 供 ticket generator 使用
+        llm_result["risk_label"] = effective_risk_label
+
         # Layer 3: 票型生成
         tickets = self.ticket_gen.generate_for_match(match, fused_probs, llm_result)
+        if factor_result:
+            tickets["factor_analysis"] = _factor_result_to_dict(factor_result)
 
         return MatchAnalysisResult(
             match_id=match.id,
@@ -178,12 +231,13 @@ class DailyPipeline:
             stat_probs=stat_probs,
             fused_probs=fused_probs,
             intel_summary=llm_result.get("intel_summary", ""),
-            risk_label=llm_result.get("risk_label", "guarded"),
-            confidence=float(llm_result.get("confidence", 50)) / 100.0,
+            risk_label=effective_risk_label,
+            confidence=effective_confidence,
             tickets=tickets,
             llm_provider=llm_client.config.provider if llm_client else "",
             llm_model=llm_client.config.model if llm_client else "",
             raw_analysis=llm_result.get("raw_text", ""),
+            factor_analysis=_factor_result_to_dict(factor_result) if factor_result else None,
         )
 
     # ── Layer 1 ─────────────────────────────────────────────────────────────
@@ -226,12 +280,12 @@ class DailyPipeline:
                 d = raw.get("draw") or raw.get("d")
                 a = raw.get("away") or raw.get("a")
                 if h and d and a:
-                    dev = remove_vig([float(h), float(d), float(a)], method="power")
-                    sources["market"] = {
-                        "home": dev.fair_probs[0],
-                        "draw": dev.fair_probs[1],
-                        "away": dev.fair_probs[2],
-                    }
+                    method = self._devig_method or "power"
+                    dev = remove_vig(
+                        {"home": float(h), "draw": float(d), "away": float(a)},
+                        method=method,
+                    )
+                    sources["market"] = dev.fair_probs
             except Exception as e:
                 logger.debug("去水差失败：%s", e)
 
@@ -357,12 +411,20 @@ class DailyPipeline:
         )
         session.add(pred)
 
+    async def _get_snap(self):
+        """Return cached SnapshotManager, initializing it in a thread on first call."""
+        if self._snap is None:
+            import asyncio
+            from core.data.snapshot import SnapshotManager
+            db_path = self.settings.duckdb_path
+            self._snap = await asyncio.to_thread(SnapshotManager, db_path)
+        return self._snap
+
     async def _save_snapshots(self, target_date: date, run_id: str):
-        from core.data.snapshot import SnapshotManager
         from db.models import Match, Prediction
         from db.session import AsyncSessionLocal
 
-        snap = SnapshotManager(db_path=self.settings.duckdb_path)
+        snap = await self._get_snap()
         session = AsyncSessionLocal()
         try:
             preds = await session.execute(
@@ -371,7 +433,7 @@ class DailyPipeline:
             for pred in preds.scalars():
                 match = await session.get(Match, pred.match_id)
                 if match:
-                    snap.save_prediction(
+                    await snap.save_prediction(
                         match_id=pred.match_id,
                         run_id=run_id,
                         kickoff_at=str(match.kickoff_at),
@@ -506,6 +568,59 @@ def _default_llm_result() -> dict:
         "confidence": 50,
         "intel_summary": "",
         "intel_adjustment": {"home": 0.0, "draw": 0.0, "away": 0.0},
+    }
+
+
+def _run_factor_scorer(llm_result: dict):
+    """
+    Build a FactorScorerResult from LLM-supplied factor_scores / flags.
+    Returns None if the LLM didn't output factor_scores (graceful degradation).
+    """
+    raw_scores = llm_result.get("factor_scores")
+    if not raw_scores or not isinstance(raw_scores, dict):
+        return None
+
+    try:
+        fs = FactorScores(
+            team_strength=float(raw_scores.get("team_strength", 50)),
+            recent_form=float(raw_scores.get("recent_form", 50)),
+            availability=float(raw_scores.get("availability", 50)),
+            tactical_matchup=float(raw_scores.get("tactical_matchup", 50)),
+            schedule_venue=float(raw_scores.get("schedule_venue", 50)),
+            motivation=float(raw_scores.get("motivation", 50)),
+            odds_market=float(raw_scores.get("odds_market", 50)),
+            psychological=float(raw_scores.get("psychological", 50)),
+        )
+
+        abnormal_raw = llm_result.get("abnormal_result", "none")
+        try:
+            abnormal = AbnormalResultType(abnormal_raw)
+        except ValueError:
+            abnormal = AbnormalResultType.NONE
+
+        tournament_raw = llm_result.get("tournament_risk", "low")
+        try:
+            tournament = TournamentRisk(tournament_raw)
+        except ValueError:
+            tournament = TournamentRisk.LOW
+
+        flags = llm_result.get("upset_flags") or []
+        return score_match(fs, abnormal, tournament, active_upset_flags=flags)
+    except Exception:
+        return None
+
+
+def _factor_result_to_dict(result) -> dict:
+    return {
+        "weighted_confidence": result.weighted_confidence,
+        "final_confidence":    result.final_confidence,
+        "risk_label":          result.risk_label.value,
+        "abnormal_result":     result.abnormal_result.value,
+        "tournament_risk":     result.tournament_risk.value,
+        "active_upset_flags":  result.active_upset_flags,
+        "upset_flag_penalty":  result.upset_flag_penalty,
+        "notes":               result.notes,
+        "factor_scores":       result.factor_scores.as_dict(),
     }
 
 

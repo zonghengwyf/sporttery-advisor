@@ -1,861 +1,761 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
+import { useRouter, useRoute } from 'vue-router'
 import api from '@/api'
 
-// ── Types ────────────────────────────────────────────────────────────
-interface MatchOdds {
-  home: number
-  draw: number
-  away: number
-  hhad?: { home: number; draw: number; away: number; handicap: number | null }
-}
-interface Match {
-  id: number
+const router = useRouter()
+const route = useRoute()
+
+// ── Types ────────────────────────────────────────────────────
+interface Leg {
+  match_id?: number
+  match_no?: string | null
   home_team: string
   away_team: string
   league: string
-  kickoff_at: string
-  sporttery_odds: MatchOdds | null
-  available_markets: string[]
+  pick: string
+  odds?: number
+  confidence?: number
+  rationale?: string
 }
-type Pick = 'home' | 'draw' | 'away'
-interface Slot { match: Match; pick: Pick | null; checked: boolean }
+interface Scheme {
+  legs: Leg[]
+  total_odds?: number
+  stake?: number
+  risk_label?: string
+  rationale?: string
+  parlay_type?: string
+  win_probability?: number
+  theoretical_prize?: number
+}
+interface Schemes {
+  conservative?: Scheme
+  balanced?: Scheme
+  high_odds?: Scheme
+  scoreline?: Scheme
+}
 
-// ── State ────────────────────────────────────────────────────────────
-const tab       = ref<'custom' | 'ai'>('custom')
-const slots     = ref<Slot[]>([])
-const loading   = ref(true)
-const parlayCode = ref('')
-const stake     = ref(2)
-const showSheet  = ref(false)
-const aiTickets  = ref<Record<string, any>>({})
-const aiLoading  = ref(false)
-const aiTab      = ref('conservative')
+// ── State ────────────────────────────────────────────────────
+const totalMatchCount = ref(0)
+const generating = ref(false)
+const schemes = ref<Schemes | null>(null)
+const activeTab = ref<'conservative' | 'balanced' | 'high_odds' | 'scoreline'>('conservative')
+const error = ref<string | null>(null)
+const progressIndex = ref(0)
+const progressMsg = ref('')
+let _lastMatchIds: number[] = []
 
-const AI_TYPES = [
-  { key: 'conservative', label: '稳健' },
-  { key: 'balanced',     label: '均衡' },
-  { key: 'aggressive',   label: '博高赔' },
-  { key: 'score',        label: '比分' },
+const TABS = [
+  { key: 'conservative' as const, label: '稳健', risk: '低风险' },
+  { key: 'balanced'     as const, label: '均衡', risk: '中风险' },
+  { key: 'high_odds'    as const, label: '博高赔', risk: '高风险' },
+  { key: 'scoreline'    as const, label: '比分', risk: '极高' },
 ]
 
-// ── Derived ──────────────────────────────────────────────────────────
-const ready = computed(() => slots.value.filter(s => s.checked && s.pick))
+const STEPS = [
+  { key: 'check',  label: '检查已有分析' },
+  { key: 'ai',     label: 'AI 情报分析' },
+  { key: 'model',  label: '概率建模' },
+  { key: 'ticket', label: '票型生成' },
+]
 
-const PICK_LABEL: Record<Pick, string> = { home: '主胜', draw: '平局', away: '客胜' }
+// ── Derived ──────────────────────────────────────────────────
+const activeScheme  = computed(() => schemes.value?.[activeTab.value] ?? null)
+const activeTabInfo = computed(() => TABS.find(t => t.key === activeTab.value) ?? TABS[0])
+const hasSchemes    = computed(() => schemes.value && TABS.some(t => schemes.value![t.key]?.legs?.length))
 
-function pickOdds(s: Slot): number {
-  if (!s.pick || !s.match.sporttery_odds) return 1
-  return s.match.sporttery_odds[s.pick] ?? 1
+function pickColorClass(pick: string) {
+  if (/主胜/.test(pick) || pick === '3') return 'tag-win'
+  if (/^平/.test(pick)  || pick === '1') return 'tag-draw'
+  if (/客胜/.test(pick) || pick === '0') return 'tag-lose'
+  return 'tag-neutral'
 }
 
-function comb(n: number, k: number): number {
-  if (k > n || k < 0) return 0
-  if (k === 0 || k === n) return 1
-  let r = 1
-  for (let i = 0; i < k; i++) r = r * (n - i) / (i + 1)
-  return Math.round(r)
+function pickLabel(pick: string) {
+  if (/主胜/.test(pick) || pick === '3') return '主胜'
+  if (/^平/.test(pick)  || pick === '1') return '平'
+  if (/客胜/.test(pick) || pick === '0') return '客胜'
+  return pick
 }
 
-interface ParlayDef { code: string; label: string; bets: number; k: number }
+// ── Generate via SSE ─────────────────────────────────────────
+async function generate(matchIds: number[]) {
+  if (!matchIds.length || generating.value) return
+  _lastMatchIds = matchIds
+  generating.value = true
+  error.value = null
+  schemes.value = null
+  progressIndex.value = 0
+  progressMsg.value = '准备中…'
 
-const parlayOptions = computed<ParlayDef[]>(() => {
-  const n = ready.value.length
-  if (n < 1) return []
-  const opts: ParlayDef[] = []
-  // 2串1 through N串1 — typical 竞彩 options
-  for (let k = Math.max(2, n > 1 ? 2 : 1); k <= n; k++) {
-    opts.push({ code: `${k}x1`, label: `${k}串1`, bets: comb(n, k), k })
+  try {
+    const token = localStorage.getItem('token') ?? ''
+    const res = await fetch('/api/tickets/stream', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      },
+      body: JSON.stringify({ match_ids: matchIds }),
+      signal: AbortSignal.timeout(600_000),
+    })
+
+    if (!res.ok) {
+      let detail = '生成失败，请检查 LLM 配置后重试'
+      try { detail = (await res.json()).detail ?? detail } catch { /* ignore */ }
+      if (res.status === 401) {
+        localStorage.removeItem('token')
+        window.location.href = `/login?redirect=${encodeURIComponent(window.location.pathname)}`
+        return
+      }
+      throw new Error(detail)
+    }
+
+    const reader = res.body!.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue
+        try {
+          const ev = JSON.parse(line.slice(6))
+          if (ev.event === 'step') {
+            progressIndex.value = ev.index ?? 0
+            progressMsg.value = ev.msg ?? ''
+          } else if (ev.event === 'done') {
+            schemes.value = ev.schemes
+            for (const t of TABS) {
+              if (ev.schemes?.[t.key]?.legs?.length) { activeTab.value = t.key; break }
+            }
+          } else if (ev.event === 'error') {
+            error.value = ev.msg ?? '未知错误'
+          }
+        } catch { /* skip malformed */ }
+      }
+    }
+
+    // 流结束但仍无方案且无错误，给出提示
+    if (!schemes.value && !error.value) {
+      error.value = '未收到方案数据，请稍后重试'
+    }
+  } catch (e: any) {
+    if (e.name === 'TimeoutError' || e.name === 'AbortError') {
+      error.value = '分析超时，请减少场次后重试（建议 ≤10 场）'
+    } else {
+      error.value = e.message || '生成失败，请检查 LLM 配置后重试'
+    }
+  } finally {
+    generating.value = false
   }
-  return opts
-})
-
-const activeParlayDef = computed(() =>
-  parlayOptions.value.find(p => p.code === parlayCode.value) ?? null
-)
-
-// When selection changes, auto-pick the last (biggest accumulator) option
-watch(() => ready.value.length, () => {
-  const opts = parlayOptions.value
-  if (!opts.length) { parlayCode.value = ''; return }
-  if (!opts.find(o => o.code === parlayCode.value)) {
-    parlayCode.value = opts[opts.length - 1].code
-  }
-})
-
-// Total odds = accumulator of all selected picks (for N串1)
-const accuOdds = computed(() => {
-  if (!ready.value.length) return 1
-  return ready.value.reduce((acc, s) => acc * pickOdds(s), 1)
-})
-
-const totalCost = computed(() => {
-  const def = activeParlayDef.value
-  if (!def) return 0
-  return def.bets * stake.value
-})
-
-const maxReturn = computed(() => {
-  // For simple N串1: total_odds * stake. For subset combos: average payout estimate
-  const def = activeParlayDef.value
-  if (!def || !ready.value.length) return 0
-  if (def.k === ready.value.length) return accuOdds.value * stake.value
-  // For subset combos, show single-combo potential (best case)
-  const sorted = [...ready.value].sort((a, b) => pickOdds(b) - pickOdds(a))
-  const best = sorted.slice(0, def.k).reduce((acc, s) => acc * pickOdds(s), 1)
-  return best * stake.value
-})
-
-// ── Methods ───────────────────────────────────────────────────────────
-function toggleCheck(i: number) {
-  slots.value[i].checked = !slots.value[i].checked
-  if (!slots.value[i].checked) slots.value[i].pick = null
 }
 
-function setPick(i: number, p: Pick) {
-  slots.value[i].pick = p
-  slots.value[i].checked = true
-}
-
-function pickClass(p: Pick | null) {
-  if (p === 'home') return 'pk-h'
-  if (p === 'draw') return 'pk-d'
-  if (p === 'away') return 'pk-a'
-  return ''
-}
-
-function fmtTime(iso: string) {
-  return new Date(iso).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
-}
-
-function fmtOdds(n: number) { return n.toFixed(2) }
-
-function clearAll() { slots.value.forEach(s => { s.checked = false; s.pick = null }) }
-
-async function loadMatches() {
-  loading.value = true
+async function generateAll() {
   try {
     const d = new Date()
     const today = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
     const { data } = await api.get('/matches/', { params: { sale_date: today } })
-    slots.value = (data as Match[]).map(m => ({ match: m, pick: null, checked: false }))
-  } catch { slots.value = [] }
-  finally { loading.value = false }
+    const ids = (data as { id: number }[]).map(m => m.id)
+    await generate(ids)
+  } catch {
+    error.value = '加载赛事失败，请稍后重试'
+  }
 }
 
-async function loadAI() {
-  if (aiLoading.value || Object.keys(aiTickets.value).length) return
-  aiLoading.value = true
+function retry() {
+  if (_lastMatchIds.length) {
+    generate(_lastMatchIds)
+  } else {
+    generateAll()
+  }
+}
+
+function goCustomSelect() {
+  router.push('/analysis?selectMode=true')
+}
+
+function resetSchemes() {
+  schemes.value = null
+  error.value = null
+}
+
+onMounted(async () => {
   try {
-    const ids = slots.value.map(s => s.match.id)
-    if (!ids.length) return
-    const { data } = await api.post('/tickets/generate', { match_ids: ids })
-    aiTickets.value = {
-      conservative: data.conservative,
-      balanced:     data.balanced,
-      aggressive:   data.high_odds,
-      score:        data.scoreline,
-    }
-  } catch { aiTickets.value = {} }
-  finally { aiLoading.value = false }
-}
+    const d = new Date()
+    const today = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
+    const { data } = await api.get('/matches/', { params: { sale_date: today } })
+    totalMatchCount.value = (data as unknown[]).length
+  } catch { /* silent */ }
 
-watch(tab, v => { if (v === 'ai') loadAI() })
-
-function aiLeg(leg: any) {
-  if (leg.pick === '主胜' || leg.pick === '3') return 'pk-h'
-  if (leg.pick === '平局' || leg.pick === '1') return 'pk-d'
-  return 'pk-a'
-}
-
-onMounted(loadMatches)
+  const idsQuery = route.query.ids as string | undefined
+  if (idsQuery) {
+    const ids = idsQuery.split(',').map(Number).filter(Boolean)
+    if (ids.length) await generate(ids)
+  }
+})
 </script>
 
 <template>
   <div class="view">
 
-    <!-- ── Tab bar ─────────────────────────────────────────────── -->
-    <div class="tab-bar">
-      <button class="tab-btn" :class="{ on: tab === 'custom' }" @click="tab = 'custom'">
-        自选串关
-        <span v-if="ready.length" class="tab-count">{{ ready.length }}</span>
+    <!-- ── Empty state ──────────────────────────────────────── -->
+    <div v-if="!hasSchemes && !generating" class="empty-wrap">
+      <div class="empty-icon-wrap">
+        <div class="te-dot-grid">
+          <span class="te-dot"></span>
+          <span class="te-dot te-dot--hi"></span>
+          <span class="te-dot"></span>
+          <span class="te-dot te-dot--hi"></span>
+          <span class="te-dot te-dot--hi"></span>
+          <span class="te-dot te-dot--hi"></span>
+          <span class="te-dot"></span>
+          <span class="te-dot te-dot--hi"></span>
+          <span class="te-dot"></span>
+        </div>
+      </div>
+
+      <div class="empty-title">今日投注方案</div>
+      <div class="empty-sub">
+        <strong>{{ totalMatchCount > 0 ? `${totalMatchCount} 场赛事` : '今日赛事' }}</strong>
+        已就绪 · AI 三模型筛选<br>稳健 / 均衡 / 博高赔 / 比分 四套方案
+      </div>
+
+      <button class="gen-all-btn" @click="generateAll">
+        <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M10 2l1.8 5.2 5.2 1.8-5.2 1.8L10 16.5l-1.8-5.2-5.2-1.8 5.2-1.8Z"/>
+        </svg>
+        一键生成今日方案
       </button>
-      <button class="tab-btn" :class="{ on: tab === 'ai' }" @click="tab = 'ai'">AI 推荐</button>
+
+      <button class="custom-select-btn" @click="goCustomSelect">
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+          <rect x="2" y="2" width="5" height="5" rx="1"/>
+          <path d="M9 4h5M9 8h5M2 12h12"/>
+        </svg>
+        自定义选场
+      </button>
+
+      <!-- Error shown beneath buttons when in empty state -->
+      <Transition name="fade">
+        <div v-if="error" class="empty-error-block">
+          <div class="empty-error-icon">
+            <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
+              <path d="M10 3L18 17H2L10 3z"/>
+              <path d="M10 9v4M10 14.5h.01" stroke-linecap="round"/>
+            </svg>
+          </div>
+          <div class="empty-error-msg">{{ error }}</div>
+          <button class="empty-retry-btn" @click="retry">重试</button>
+        </div>
+      </Transition>
     </div>
 
-    <!-- ══════════════════════════════════════════════════════════ -->
-    <!-- TAB: 自选串关                                              -->
-    <!-- ══════════════════════════════════════════════════════════ -->
-    <template v-if="tab === 'custom'">
-      <div v-if="loading" class="match-scroll">
-        <div v-for="i in 5" :key="i" class="skeleton" style="height:72px;margin-bottom:2px" />
-      </div>
-
-      <div v-else-if="!slots.length" class="empty-tip">
-        <p class="empty-title">暂无赛事</p>
-        <p class="text-sm text-muted mt-2">回到今日赛事同步赛单</p>
-      </div>
-
-      <div v-else class="match-scroll" :style="ready.length ? 'padding-bottom:160px' : ''">
-
-        <!-- Section label -->
-        <div class="section-label px-4 pt-3 pb-1">
-          点击赛事选择投注方向 · 可多选
-          <button v-if="ready.length" class="clear-btn" @click="clearAll">清空</button>
+    <!-- ── Generating (SSE real-time) ────────────────────────── -->
+    <div v-if="generating" class="gen-loading">
+      <div class="gen-loading-inner">
+        <div class="spin-ring" />
+        <div class="gen-loading-text">
+          <div class="gen-loading-title">正在生成方案…</div>
+          <div class="gen-loading-sub">{{ progressMsg || '统计建模 · 情报融合 · 多模型投票' }}</div>
         </div>
-
-        <!-- Match rows -->
+      </div>
+      <div class="gen-loading-steps">
         <div
-          v-for="(s, i) in slots"
-          :key="s.match.id"
-          class="match-row"
-          :class="{ 'match-row--on': s.checked }"
+          v-for="(s, i) in STEPS"
+          :key="s.key"
+          class="step-item"
+          :class="{
+            'step-done':    i < progressIndex,
+            'step-active':  i === progressIndex,
+            'step-pending': i > progressIndex,
+          }"
         >
-          <!-- Left: checkbox + meta -->
-          <button class="row-check" @click="toggleCheck(i)">
-            <span class="chk" :class="{ 'chk--on': s.checked }">
-              <svg v-if="s.checked" width="10" height="10" viewBox="0 0 10 10" fill="none">
-                <path d="M2 5l2.5 2.5L8 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
-              </svg>
-            </span>
-            <div class="row-meta">
-              <span class="row-league">{{ s.match.league }}</span>
-              <span class="row-time font-num">{{ fmtTime(s.match.kickoff_at) }}</span>
-            </div>
-          </button>
-
-          <!-- Center: teams -->
-          <div class="row-teams" @click="toggleCheck(i)">
-            <span class="team-name">{{ s.match.home_team }}</span>
-            <span class="row-vs">VS</span>
-            <span class="team-name team-name--away">{{ s.match.away_team }}</span>
-          </div>
-
-          <!-- Right: pick buttons -->
-          <div class="row-picks" v-if="s.match.sporttery_odds">
-            <button
-              class="pk pk-h"
-              :class="{ 'pk--on': s.pick === 'home' }"
-              @click.stop="setPick(i, 'home')"
-            >
-              <span class="pk-lbl">主胜</span>
-              <span class="pk-odd font-num">{{ fmtOdds(s.match.sporttery_odds.home) }}</span>
-            </button>
-            <button
-              class="pk pk-d"
-              :class="{ 'pk--on': s.pick === 'draw' }"
-              @click.stop="setPick(i, 'draw')"
-            >
-              <span class="pk-lbl">平</span>
-              <span class="pk-odd font-num">{{ fmtOdds(s.match.sporttery_odds.draw) }}</span>
-            </button>
-            <button
-              class="pk pk-a"
-              :class="{ 'pk--on': s.pick === 'away' }"
-              @click.stop="setPick(i, 'away')"
-            >
-              <span class="pk-lbl">客胜</span>
-              <span class="pk-odd font-num">{{ fmtOdds(s.match.sporttery_odds.away) }}</span>
-            </button>
-          </div>
-          <div v-else class="row-no-odds text-muted">赔率待更新</div>
+          <!-- Done: checkmark -->
+          <svg v-if="i < progressIndex" class="step-icon step-icon--done" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="2,6 5,9 10,3"/>
+          </svg>
+          <!-- Active: pulsing dot -->
+          <span v-else-if="i === progressIndex" class="step-dot step-dot--spin" />
+          <!-- Pending: empty dot -->
+          <span v-else class="step-dot" />
+          <span class="step-label">{{ s.label }}</span>
+          <span v-if="i === progressIndex && progressMsg" class="step-detail">{{ progressMsg }}</span>
         </div>
       </div>
+    </div>
 
-      <!-- ── Sticky bottom action bar ────────────────────────── -->
-      <Transition name="bar">
-        <div v-if="ready.length" class="action-bar">
+    <!-- ── Scheme results ──────────────────────────────────────── -->
+    <div v-if="hasSchemes && !generating" class="results-wrap">
 
-          <!-- Row 1: parlay type chips -->
-          <div class="parlay-row">
-            <span class="parlay-label">串关</span>
-            <div class="parlay-chips">
-              <button
-                v-for="opt in parlayOptions"
-                :key="opt.code"
-                class="parlay-chip"
-                :class="{ 'parlay-chip--on': parlayCode === opt.code }"
-                @click="parlayCode = opt.code"
-              >
-                {{ opt.label }}
-                <span class="chip-bets">{{ opt.bets }}注</span>
-              </button>
-            </div>
-          </div>
-
-          <!-- Row 2: stake + summary + generate -->
-          <div class="bar-row2">
-            <div class="stake-group">
-              <span class="stake-label">每注</span>
-              <span class="stake-sym">¥</span>
-              <input
-                v-model.number="stake"
-                type="number"
-                min="2"
-                step="1"
-                class="stake-input font-num"
-              />
-            </div>
-
-            <div class="bar-summary">
-              <div class="summary-item">
-                <span class="s-label">总投入</span>
-                <span class="s-val font-num">¥{{ totalCost.toFixed(0) }}</span>
-              </div>
-              <div class="summary-sep">·</div>
-              <div class="summary-item">
-                <span class="s-label">赔率</span>
-                <span class="s-val font-num text-primary">×{{ accuOdds.toFixed(2) }}</span>
-              </div>
-            </div>
-
-            <button
-              class="gen-btn"
-              :disabled="!parlayCode"
-              @click="showSheet = true"
-            >
-              查看方案
-            </button>
-          </div>
+      <!-- Results header -->
+      <div class="results-head">
+        <div class="results-head-left">
+          <div class="results-title">AI 投注方案</div>
+          <div class="results-sub">点击场次号可在官网核对赔率</div>
         </div>
-      </Transition>
+        <button class="reselect-btn" @click="resetSchemes">
+          <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M14 8A6 6 0 0 1 2.5 12M2 8a6 6 0 0 1 11.5-4M2 4v4h4M14 12v-4h-4"/>
+          </svg>
+          重新生成
+        </button>
+      </div>
 
-      <!-- ── Result sheet ─────────────────────────────────────── -->
-      <Transition name="sheet">
-        <div v-if="showSheet && ready.length" class="sheet-overlay" @click.self="showSheet = false">
-          <div class="sheet">
-            <div class="sheet-handle" />
-            <div class="sheet-head">
-              <div>
-                <div class="sheet-title font-disp">{{ activeParlayDef?.label ?? '' }} 投注方案</div>
-                <div class="text-xs text-muted mt-1">{{ ready.length }} 场 · {{ activeParlayDef?.bets ?? 0 }} 注</div>
-              </div>
-              <button class="sheet-close" @click="showSheet = false">✕</button>
-            </div>
-
-            <div class="sheet-legs">
-              <div v-for="(s, i) in ready" :key="i" class="sheet-leg">
-                <div class="leg-idx font-num font-disp">{{ String(i+1).padStart(2,'0') }}</div>
-                <div class="leg-info">
-                  <div class="leg-teams">{{ s.match.home_team }} vs {{ s.match.away_team }}</div>
-                  <div class="text-xs text-muted">{{ s.match.league }} · {{ fmtTime(s.match.kickoff_at) }}</div>
-                </div>
-                <span class="leg-pick" :class="pickClass(s.pick)">
-                  {{ s.pick ? PICK_LABEL[s.pick] : '' }}
-                </span>
-                <span class="leg-odd-val font-num">{{ fmtOdds(pickOdds(s)) }}</span>
-              </div>
-            </div>
-
-            <div class="sheet-dashed" />
-
-            <div class="sheet-foot">
-              <div class="foot-stat">
-                <div class="text-xs text-muted">串关类型</div>
-                <div class="foot-big font-disp">{{ activeParlayDef?.label }}</div>
-              </div>
-              <div class="foot-stat">
-                <div class="text-xs text-muted">注数 × 每注</div>
-                <div class="foot-big font-num">{{ activeParlayDef?.bets }} × ¥{{ stake }}</div>
-              </div>
-              <div class="foot-stat foot-stat--highlight">
-                <div class="text-xs text-muted">总投入</div>
-                <div class="foot-big font-num text-primary">¥{{ totalCost.toFixed(0) }}</div>
-              </div>
-              <div class="foot-stat foot-stat--highlight">
-                <div class="text-xs text-muted">最高中奖</div>
-                <div class="foot-big font-num text-green">¥{{ maxReturn.toFixed(0) }}</div>
-              </div>
-            </div>
-
-            <div class="sheet-note text-muted">
-              赔率实时变动，以竞彩官方出票时赔率为准
-            </div>
-          </div>
-        </div>
-      </Transition>
-    </template>
-
-    <!-- ══════════════════════════════════════════════════════════ -->
-    <!-- TAB: AI 推荐                                               -->
-    <!-- ══════════════════════════════════════════════════════════ -->
-    <template v-else>
-      <div class="ai-subtabs">
+      <!-- Tabs -->
+      <div class="scheme-tabs">
         <button
-          v-for="t in AI_TYPES" :key="t.key"
-          class="ai-subtab"
-          :class="{ on: aiTab === t.key }"
-          @click="aiTab = t.key"
-        >{{ t.label }}</button>
+          v-for="t in TABS"
+          :key="t.key"
+          class="scheme-tab"
+          :class="{ 'tab-on': activeTab === t.key, 'tab-disabled': !schemes![t.key]?.legs?.length }"
+          :disabled="!schemes![t.key]?.legs?.length"
+          @click="activeTab = t.key"
+        >
+          <span class="tab-label">{{ t.label }}</span>
+          <span class="tab-risk">{{ t.risk }}</span>
+          <span class="tab-count font-num">
+            {{ schemes![t.key]?.legs?.length ? `${schemes![t.key]!.legs.length}串1` : '—' }}
+          </span>
+        </button>
       </div>
 
-      <div v-if="aiLoading" class="p-5">
-        <div class="skeleton" style="height:280px" />
-      </div>
+      <!-- Active scheme -->
+      <div v-if="activeScheme" class="scheme-card">
 
-      <div v-else class="ticket-wrap">
-        <template v-if="aiTickets[aiTab]">
-          <div class="card no-accent ticket-card">
-            <div class="ticket-head">
-              <div>
-                <div class="font-disp" style="font-size:14px;font-weight:700">
-                  {{ AI_TYPES.find(t => t.key === aiTab)?.label }}方案
-                </div>
-                <div class="text-xs text-muted mt-1">AI 综合概率分析</div>
-              </div>
-              <span class="badge badge-red">{{ aiTickets[aiTab].risk_label || '中风险' }}</span>
+        <!-- Card header -->
+        <div class="scheme-card-head">
+          <div class="scheme-card-head-left">
+            <span class="scheme-name">{{ activeTabInfo.label }}方案</span>
+            <span class="scheme-parlay font-num">
+              {{ activeScheme.parlay_type || `${activeScheme.legs?.length}串1` }}
+            </span>
+          </div>
+          <span class="risk-badge" :class="activeTab">{{ activeScheme.risk_label || activeTabInfo.risk }}</span>
+        </div>
+
+        <!-- Legend -->
+        <div class="leg-legend">
+          <span class="legend-no">场次</span>
+          <span class="legend-match">对阵</span>
+          <span class="legend-pick">投注</span>
+          <span class="legend-odds">赔率</span>
+        </div>
+
+        <!-- Legs -->
+        <div class="scheme-legs">
+          <div v-for="(leg, i) in activeScheme.legs" :key="i" class="scheme-leg">
+            <div class="leg-no-col">
+              <div v-if="leg.match_no" class="leg-match-no font-num">{{ leg.match_no }}</div>
+              <div v-else class="leg-seq font-num">{{ String(i+1).padStart(2,'0') }}</div>
             </div>
-            <div class="divider" />
-            <div class="legs">
-              <div v-for="(leg, i) in aiTickets[aiTab].legs" :key="i" class="leg-row">
-                <div class="leg-num font-disp">{{ String(i+1).padStart(2,'0') }}</div>
-                <div class="leg-match">
-                  <div style="font-size:13px;font-weight:600">{{ leg.home_team }} vs {{ leg.away_team }}</div>
-                  <div class="text-xs text-muted">{{ leg.league }}</div>
+            <div class="leg-info">
+              <div class="leg-teams">
+                <div class="leg-team-row">
+                  <span class="leg-dot leg-dot--h"></span>
+                  <span class="leg-team-name">{{ leg.home_team }}</span>
                 </div>
-                <span class="leg-pick" :class="aiLeg(leg)">{{ leg.pick }}</span>
-                <span class="leg-odd-val font-num">{{ leg.odds?.toFixed(2) ?? '-' }}</span>
+                <div class="leg-team-row">
+                  <span class="leg-dot leg-dot--a"></span>
+                  <span class="leg-team-name">{{ leg.away_team }}</span>
+                </div>
               </div>
+              <div class="leg-meta">
+                <span class="leg-league">{{ leg.league }}</span>
+                <span v-if="leg.confidence" class="leg-conf font-num">{{ leg.confidence }}%</span>
+              </div>
+              <div v-if="leg.rationale" class="leg-rationale">{{ leg.rationale }}</div>
             </div>
-            <div class="sheet-dashed" style="margin:0 14px" />
-            <div class="sheet-foot" style="padding:12px 16px">
-              <div class="foot-stat">
-                <div class="text-xs text-muted">建议投注</div>
-                <div class="foot-big font-num">¥{{ aiTickets[aiTab].stake ?? 20 }}</div>
-              </div>
-              <div class="foot-stat">
-                <div class="text-xs text-muted">总赔率</div>
-                <div class="foot-big font-num text-primary">×{{ aiTickets[aiTab].total_odds?.toFixed(2) ?? '-' }}</div>
-              </div>
-              <div class="foot-stat">
-                <div class="text-xs text-muted">预期收益</div>
-                <div class="foot-big font-num text-green">
-                  ¥{{ Math.round((aiTickets[aiTab].total_odds ?? 1) * (aiTickets[aiTab].stake ?? 20)) }}
-                </div>
-              </div>
+            <div class="leg-pick-col">
+              <span class="leg-pick" :class="pickColorClass(leg.pick)">{{ pickLabel(leg.pick) }}</span>
+            </div>
+            <div class="leg-odds-col">
+              <span v-if="leg.odds" class="leg-odds font-num">{{ leg.odds.toFixed(2) }}</span>
+              <span v-else class="leg-odds text-muted">—</span>
             </div>
           </div>
+        </div>
 
-          <div v-if="aiTickets[aiTab].rationale" class="rationale">
-            <div class="flex items-center gap-2 mb-2">
-              <div class="chat-avatar chat-avatar--sm">AI</div>
-              <span class="text-xs font-disp text-muted">方案说明</span>
-            </div>
-            <p class="chat-bubble-ai">{{ aiTickets[aiTab].rationale }}</p>
+        <!-- Divider -->
+        <div class="scheme-divider" />
+
+        <!-- Stats -->
+        <div class="scheme-stats">
+          <div class="stat-cell">
+            <div class="stat-label">建议投注</div>
+            <div class="stat-val font-num">¥{{ activeScheme.stake ?? 20 }}</div>
           </div>
-        </template>
+          <div class="stat-sep" />
+          <div class="stat-cell">
+            <div class="stat-label">综合赔率</div>
+            <div class="stat-val font-num text-primary">×{{ activeScheme.total_odds?.toFixed(2) ?? '—' }}</div>
+          </div>
+          <div class="stat-sep" />
+          <div class="stat-cell">
+            <div class="stat-label">最高预期</div>
+            <div class="stat-val font-num text-green">
+              ¥{{ activeScheme.theoretical_prize
+                ? Math.round(activeScheme.theoretical_prize)
+                : Math.round((activeScheme.total_odds ?? 1) * (activeScheme.stake ?? 20)) }}
+            </div>
+          </div>
+        </div>
 
-        <div v-else class="empty-tip">
-          <p class="empty-title">暂无 AI 方案</p>
-          <p class="text-sm text-muted mt-2">请先完成赛事分析</p>
+        <!-- Win probability bar -->
+        <div v-if="activeScheme.win_probability" class="win-prob-bar-wrap">
+          <div class="win-prob-label">
+            <span>中奖概率</span>
+            <span class="font-num text-primary">{{ (activeScheme.win_probability * 100).toFixed(1) }}%</span>
+          </div>
+          <div class="win-prob-track">
+            <div class="win-prob-fill" :style="{ width: `${Math.min(activeScheme.win_probability * 100, 100)}%` }" />
+          </div>
+        </div>
+
+        <!-- AI rationale -->
+        <div v-if="activeScheme.rationale" class="scheme-rationale">
+          <div class="rationale-header">
+            <span class="chat-avatar chat-avatar--sm">AI</span>
+            <span class="rationale-label">方案说明</span>
+          </div>
+          <p class="rationale-body">{{ activeScheme.rationale }}</p>
         </div>
       </div>
-    </template>
+
+      <!-- Empty tab state -->
+      <div v-else class="empty-tip">
+        <p class="empty-title" style="font-size:14px">该类型无推荐</p>
+        <p class="text-sm text-muted mt-1">切换其他方案类型查看</p>
+      </div>
+    </div>
 
   </div>
 </template>
 
 <style scoped>
-.view { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
+.view { display: flex; flex-direction: column; min-height: 100%; position: relative; }
 
-/* ── Tabs ─────────────────────────────────────────────────────── */
-.tab-bar {
-  display: flex;
-  border-bottom: var(--card-bd);
-  flex-shrink: 0;
-}
-.tab-btn {
+/* ── Empty state ────────────────────────────────────────────── */
+.empty-wrap {
   flex: 1;
-  padding: 11px 8px;
-  font-size: 13px;
-  font-weight: 600;
-  font-family: var(--font);
-  background: transparent;
-  cursor: pointer;
-  color: var(--text2);
-  border-bottom: 2px solid transparent;
-  transition: color .15s, border-color .15s;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-}
-.tab-btn.on { color: var(--text); border-bottom-color: var(--primary); }
-.tab-count {
-  background: var(--primary);
-  color: #fff;
-  font-size: 10px;
-  font-weight: 700;
-  padding: 1px 5px;
-  border-radius: 8px;
-  font-family: var(--font-num);
-}
-
-/* ── Match list ───────────────────────────────────────────────── */
-.match-scroll {
-  flex: 1;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-}
-
-.section-label {
-  font-size: 11px;
-  color: var(--text3);
-  letter-spacing: .3px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-.clear-btn {
-  font-size: 11px;
-  color: var(--primary);
-  background: transparent;
-  cursor: pointer;
-  font-family: var(--font);
-}
-
-.match-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 12px 10px 10px;
-  border-bottom: var(--card-bd);
-  transition: background .12s;
-  cursor: pointer;
-}
-.match-row--on { background: color-mix(in srgb, var(--primary) 6%, transparent); }
-
-.row-check {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  background: transparent;
-  cursor: pointer;
-  flex-shrink: 0;
-  padding: 0;
-}
-.chk {
-  width: 16px;
-  height: 16px;
-  border-radius: 4px;
-  border: 1.5px solid var(--line);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  transition: all .12s;
-  color: #fff;
-}
-.chk--on { background: var(--primary); border-color: var(--primary); }
-
-.row-meta {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  min-width: 30px;
-}
-.row-league { font-size: 10px; color: var(--text3); white-space: nowrap; max-width: 52px; overflow: hidden; text-overflow: ellipsis; }
-.row-time { font-size: 11px; color: var(--text2); }
-
-.row-teams {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  min-width: 0;
-  cursor: pointer;
-}
-.team-name { font-size: 12px; font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.team-name--away { text-align: right; }
-.row-vs { font-size: 10px; color: var(--text3); font-family: var(--font-disp); flex-shrink: 0; }
-
-.row-picks {
-  display: flex;
-  gap: 4px;
-  flex-shrink: 0;
-}
-.row-no-odds { font-size: 10px; color: var(--text3); flex-shrink: 0; }
-
-/* Pick buttons */
-.pk {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 1px;
-  padding: 4px 6px;
-  border-radius: 5px;
-  border: 1px solid var(--line);
-  background: transparent;
-  cursor: pointer;
-  transition: all .12s;
-  min-width: 42px;
-}
-.pk:active { transform: translateY(1px); }
-.pk-lbl { font-size: 9px; color: var(--text3); font-family: var(--font); white-space: nowrap; }
-.pk-odd { font-size: 12px; font-weight: 600; color: var(--text2); }
-
-/* Pick selected states */
-.pk-h.pk--on { background: color-mix(in srgb, var(--primary) 15%, transparent); border-color: var(--primary); }
-.pk-h.pk--on .pk-lbl { color: var(--primary); }
-.pk-h.pk--on .pk-odd { color: var(--primary); }
-
-.pk-d.pk--on { background: color-mix(in srgb, var(--draw-c, #f59e0b) 15%, transparent); border-color: var(--draw-c, #f59e0b); }
-.pk-d.pk--on .pk-lbl { color: var(--draw-c, #f59e0b); }
-.pk-d.pk--on .pk-odd { color: var(--draw-c, #f59e0b); }
-
-.pk-a.pk--on { background: color-mix(in srgb, var(--green, #22c55e) 15%, transparent); border-color: var(--green, #22c55e); }
-.pk-a.pk--on .pk-lbl { color: var(--green, #22c55e); }
-.pk-a.pk--on .pk-odd { color: var(--green, #22c55e); }
-
-/* ── Action bar ───────────────────────────────────────────────── */
-.action-bar {
-  position: fixed;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  background: var(--card);
-  border-top: 1.5px solid var(--primary);
-  padding: 10px 14px calc(10px + env(safe-area-inset-bottom));
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  z-index: 40;
-}
-
-.parlay-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.parlay-label { font-size: 11px; color: var(--text3); flex-shrink: 0; }
-.parlay-chips { display: flex; gap: 5px; flex-wrap: wrap; }
-.parlay-chip {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 10px;
-  border-radius: 14px;
-  border: 1.5px solid var(--line);
-  background: transparent;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text2);
-  cursor: pointer;
-  font-family: var(--font);
-  transition: all .12s;
-}
-.parlay-chip.parlay-chip--on {
-  border-color: var(--primary);
-  background: color-mix(in srgb, var(--primary) 12%, transparent);
-  color: var(--primary);
-}
-.chip-bets { font-size: 10px; color: inherit; opacity: .7; font-family: var(--font-num); }
-
-.bar-row2 { display: flex; align-items: center; gap: 10px; }
-
-.stake-group {
-  display: flex;
-  align-items: center;
-  gap: 3px;
-  flex-shrink: 0;
-}
-.stake-label { font-size: 11px; color: var(--text3); }
-.stake-sym { font-size: 13px; color: var(--text2); }
-.stake-input {
-  width: 44px;
-  background: var(--bg);
-  border: 1.5px solid var(--line);
-  border-radius: 5px;
-  color: var(--text);
-  font-size: 13px;
-  font-weight: 600;
-  padding: 3px 5px;
+  padding: 40px 24px 80px;
   text-align: center;
-  font-family: var(--font-num);
+  gap: 0;
 }
-.stake-input:focus { outline: none; border-color: var(--primary); }
-
-.bar-summary {
+.empty-icon-wrap {
+  margin-bottom: 20px;
+  width: 72px; height: 72px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--primary) 8%, transparent);
   display: flex;
   align-items: center;
-  gap: 6px;
-  flex: 1;
+  justify-content: center;
 }
-.summary-item { display: flex; flex-direction: column; gap: 1px; }
-.s-label { font-size: 9px; color: var(--text3); }
-.s-val { font-size: 13px; font-weight: 700; color: var(--text); }
-.summary-sep { color: var(--text3); font-size: 12px; }
+.te-dot-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 9px);
+  grid-template-rows: repeat(3, 9px);
+  gap: 5px;
+}
+.te-dot {
+  width: 9px; height: 9px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--primary) 22%, transparent);
+}
+.te-dot--hi { background: var(--primary); }
+.empty-title {
+  font-family: var(--font-disp);
+  font-size: 24px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: .3px;
+  color: var(--text);
+  line-height: 1.1;
+  margin-bottom: 8px;
+}
+.empty-sub {
+  font-size: 12px;
+  color: var(--text3);
+  line-height: 1.65;
+  max-width: 260px;
+  margin-bottom: 28px;
+}
+.empty-sub strong { color: var(--primary); font-weight: 700; }
 
-.gen-btn {
-  padding: 8px 16px;
+.gen-all-btn {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 13px 28px;
   background: var(--primary);
   color: #fff;
-  border-radius: 7px;
-  font-size: 13px;
+  border-radius: 10px;
+  font-size: 15px;
   font-weight: 700;
   font-family: var(--font-disp);
   cursor: pointer;
-  white-space: nowrap;
-  flex-shrink: 0;
-  transition: opacity .12s;
-  letter-spacing: .3px;
-}
-.gen-btn:disabled { opacity: .4; cursor: not-allowed; }
-.gen-btn:not(:disabled):active { opacity: .8; transform: translateY(1px); }
-
-/* ── Sheet (result overlay) ───────────────────────────────────── */
-.sheet-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0,0,0,.6);
-  z-index: 50;
-  display: flex;
-  align-items: flex-end;
-}
-.sheet {
   width: 100%;
-  max-height: 85dvh;
-  background: var(--card);
-  border-radius: 14px 14px 0 0;
+  max-width: 300px;
+  justify-content: center;
+  transition: opacity .12s, transform .1s;
+  letter-spacing: .3px;
+  margin-bottom: 12px;
+  box-shadow: var(--fab-sh);
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+.gen-all-btn:active { opacity: .82; transform: scale(0.96); }
+
+.custom-select-btn {
   display: flex;
-  flex-direction: column;
-  overflow: hidden;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 16px;
+  font-size: 13px;
+  color: var(--text2);
+  background: transparent;
+  cursor: pointer;
+  font-family: var(--font);
+  border: var(--card-bd);
+  border-radius: 8px;
+  transition: color .15s, border-color .15s;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
 }
-.sheet-handle {
-  width: 36px;
-  height: 4px;
-  background: var(--line);
-  border-radius: 2px;
-  margin: 10px auto 0;
-  flex-shrink: 0;
-}
-.sheet-head {
+.custom-select-btn:hover { color: var(--primary); border-color: var(--primary); }
+
+/* Error block in empty state */
+.empty-error-block {
+  margin-top: 20px;
   display: flex;
   align-items: flex-start;
-  justify-content: space-between;
-  padding: 14px 16px 10px;
-  flex-shrink: 0;
-}
-.sheet-title { font-size: 15px; font-weight: 700; }
-.sheet-close {
-  font-size: 14px;
-  color: var(--text3);
-  background: transparent;
-  cursor: pointer;
-  padding: 4px;
-  line-height: 1;
-}
-
-.sheet-legs {
-  flex: 1;
-  overflow-y: auto;
-  border-top: var(--card-bd);
-}
-.sheet-leg {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 16px;
-  border-bottom: var(--card-bd);
-}
-.sheet-leg:last-child { border-bottom: none; }
-.leg-idx { font-size: 12px; font-weight: 700; color: var(--text3); min-width: 20px; }
-.leg-info { flex: 1; min-width: 0; }
-.leg-teams { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.leg-pick {
-  font-size: 11px;
-  font-weight: 700;
-  padding: 3px 8px;
-  border-radius: 4px;
-  flex-shrink: 0;
-}
-.pk-h { background: color-mix(in srgb, var(--primary) 15%, transparent); color: var(--primary); }
-.pk-d { background: color-mix(in srgb, var(--draw-c, #f59e0b) 15%, transparent); color: var(--draw-c, #f59e0b); }
-.pk-a { background: color-mix(in srgb, var(--green, #22c55e) 15%, transparent); color: var(--green, #22c55e); }
-.leg-odd-val { font-size: 14px; font-weight: 700; color: var(--text); min-width: 36px; text-align: right; }
-
-.sheet-dashed {
-  border: none;
-  border-top: 1.5px dashed var(--line);
-  flex-shrink: 0;
-}
-.sheet-foot {
-  display: flex;
-  gap: 0;
-  flex-shrink: 0;
-  padding: 14px 16px;
-  flex-wrap: wrap;
-  row-gap: 10px;
-}
-.foot-stat { flex: 1; min-width: 80px; display: flex; flex-direction: column; gap: 3px; }
-.foot-big { font-size: 18px; font-weight: 700; line-height: 1; }
-.sheet-note {
-  font-size: 10px;
-  text-align: center;
-  padding: 0 16px 14px;
-  flex-shrink: 0;
-}
-
-/* ── AI sub-tab ───────────────────────────────────────────────── */
-.ai-subtabs {
-  display: flex;
-  border-bottom: var(--card-bd);
-  flex-shrink: 0;
-}
-.ai-subtab {
-  flex: 1;
-  padding: 9px 4px;
-  font-size: 12px;
-  font-weight: 600;
-  font-family: var(--font);
-  background: transparent;
-  cursor: pointer;
-  color: var(--text2);
-  border-bottom: 2px solid transparent;
-  transition: color .15s, border-color .15s;
-}
-.ai-subtab.on { color: var(--primary); border-bottom-color: var(--primary); }
-
-.ticket-wrap { padding: 14px; flex: 1; overflow-y: auto; }
-.ticket-card { margin-bottom: 12px; }
-.ticket-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+  gap: 8px;
   padding: 12px 14px;
+  background: color-mix(in srgb, #ef4444 8%, var(--card));
+  border: 1px solid color-mix(in srgb, #ef4444 30%, transparent);
+  border-radius: 8px;
+  max-width: 300px;
+  width: 100%;
+  text-align: left;
 }
-.legs { display: flex; flex-direction: column; }
-.leg-row {
+.empty-error-icon { color: #ef4444; flex-shrink: 0; margin-top: 1px; }
+.empty-error-msg { flex: 1; font-size: 12px; color: var(--text2); line-height: 1.5; }
+.empty-retry-btn {
+  font-size: 12px; color: var(--primary); background: transparent;
+  cursor: pointer; font-family: var(--font); white-space: nowrap; flex-shrink: 0;
+  padding: 0; font-weight: 600;
+}
+
+/* ── Generating state ───────────────────────────────────────── */
+.gen-loading {
+  margin: 16px;
+  background: var(--card);
+  border: var(--card-bd);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.gen-loading-inner {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px;
+  border-bottom: var(--card-bd);
+}
+.spin-ring {
+  width: 26px; height: 26px;
+  border: 2.5px solid var(--line);
+  border-top-color: var(--primary);
+  border-radius: 50%;
+  animation: spin .8s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.gen-loading-title { font-size: 13px; font-weight: 700; }
+.gen-loading-sub { font-size: 11px; color: var(--text3); margin-top: 3px; line-height: 1.5; }
+
+.gen-loading-steps { display: flex; flex-direction: column; padding: 4px 0; }
+.step-item {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 14px;
+  padding: 9px 16px;
+  font-size: 12px;
+  color: var(--text3);
   border-bottom: var(--card-bd);
+  transition: background .15s;
 }
-.leg-row:last-child { border-bottom: none; }
-.leg-num { font-size: 12px; font-weight: 700; color: var(--text3); min-width: 22px; }
-.leg-match { flex: 1; }
-.leg-odd-val { font-size: 14px; font-weight: 600; min-width: 36px; text-align: right; }
+.step-item:last-child { border-bottom: none; }
+.step-active {
+  color: var(--text);
+  font-weight: 600;
+  background: color-mix(in srgb, var(--primary) 4%, transparent);
+}
+.step-done { color: var(--text3); }
 
-.rationale { padding: 0 0 8px; }
+.step-icon { flex-shrink: 0; }
+.step-icon--done { color: var(--green, #22c55e); }
 
-/* ── Shared ───────────────────────────────────────────────────── */
-.empty-tip {
+.step-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--line); flex-shrink: 0; }
+.step-dot--spin { background: var(--primary); animation: pulse 1s ease-in-out infinite; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
+
+.step-label { flex-shrink: 0; }
+.step-detail { font-size: 11px; color: var(--primary); margin-left: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── Results ────────────────────────────────────────────────── */
+.results-wrap { padding: 12px 14px 32px; display: flex; flex-direction: column; gap: 10px; }
+
+.results-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.results-title { font-size: 14px; font-weight: 700; }
+.results-sub { font-size: 11px; color: var(--text3); margin-top: 2px; }
+
+.reselect-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text2);
+  background: transparent;
+  cursor: pointer;
+  font-family: var(--font);
+  padding: 5px 8px;
+  border: var(--card-bd);
+  border-radius: 6px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* Tabs */
+.scheme-tabs { display: flex; gap: 5px; }
+.scheme-tab {
   flex: 1;
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
-  padding: 60px 20px;
+  gap: 2px;
+  padding: 8px 4px;
+  font-family: var(--font);
+  background: var(--card);
+  border: var(--card-bd);
+  border-radius: 7px;
+  cursor: pointer;
+  transition: all .12s;
+}
+.tab-label { font-size: 12px; font-weight: 700; color: var(--text2); }
+.tab-risk { font-size: 9px; color: var(--text3); }
+.tab-count { font-family: var(--font-disp); font-size: 10px; color: var(--text3); }
+.scheme-tab.tab-on { background: var(--primary); border-color: var(--primary); }
+.scheme-tab.tab-on .tab-label { color: #fff; }
+.scheme-tab.tab-on .tab-risk { color: rgba(255,255,255,.7); }
+.scheme-tab.tab-on .tab-count { color: rgba(255,255,255,.7); }
+.scheme-tab.tab-disabled { opacity: .35; cursor: not-allowed; }
+
+/* Scheme card */
+.scheme-card { background: var(--card); border: var(--card-bd); border-radius: 10px; overflow: hidden; }
+
+.scheme-card-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 11px 14px; border-bottom: var(--card-bd);
+  background: color-mix(in srgb, var(--primary) 3%, var(--bg));
+}
+.scheme-card-head-left { display: flex; align-items: center; gap: 8px; }
+.scheme-name { font-size: 13px; font-weight: 700; }
+.scheme-parlay { font-size: 11px; color: var(--text3); }
+
+.risk-badge { font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 4px; }
+.risk-badge.conservative { background: color-mix(in srgb, var(--green, #22c55e) 12%, transparent); color: var(--green, #22c55e); }
+.risk-badge.balanced { background: color-mix(in srgb, #3b82f6 12%, transparent); color: #3b82f6; }
+.risk-badge.high_odds { background: color-mix(in srgb, #f59e0b 12%, transparent); color: #d97706; }
+.risk-badge.scoreline { background: color-mix(in srgb, #ef4444 12%, transparent); color: #ef4444; }
+
+.leg-legend {
+  display: flex; align-items: center;
+  padding: 5px 14px;
+  background: var(--bg); border-bottom: var(--card-bd); gap: 8px;
+}
+.legend-no  { font-size: 10px; color: var(--text3); min-width: 38px; flex-shrink: 0; }
+.legend-match { font-size: 10px; color: var(--text3); flex: 1; }
+.legend-pick  { font-size: 10px; color: var(--text3); min-width: 32px; text-align: center; flex-shrink: 0; }
+.legend-odds  { font-size: 10px; color: var(--text3); min-width: 36px; text-align: right; flex-shrink: 0; }
+
+.scheme-legs { display: flex; flex-direction: column; }
+.scheme-leg { display: flex; align-items: flex-start; gap: 8px; padding: 11px 14px; border-bottom: var(--card-bd); }
+.scheme-leg:last-child { border-bottom: none; }
+
+.leg-no-col { min-width: 38px; flex-shrink: 0; padding-top: 1px; }
+.leg-match-no {
+  font-size: 11px; font-weight: 700; color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+  border-radius: 3px; padding: 2px 5px; display: inline-block;
+}
+.leg-seq { font-size: 12px; font-weight: 700; color: var(--text3); }
+
+.leg-info { flex: 1; min-width: 0; }
+.leg-teams { display: flex; flex-direction: column; gap: 3px; margin-bottom: 2px; }
+.leg-team-row { display: flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; line-height: 1.2; }
+.leg-dot { width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0; }
+.leg-dot--h { background: var(--primary); }
+.leg-dot--a { background: var(--draw-c, #1D4ED8); }
+.leg-team-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.leg-meta { display: flex; align-items: center; gap: 8px; margin-top: 1px; }
+.leg-league { font-size: 10px; color: var(--text3); }
+.leg-conf   { font-size: 10px; color: var(--primary); font-weight: 600; }
+.leg-rationale {
+  font-size: 11px; color: var(--text2); margin-top: 4px; line-height: 1.5;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
 
-/* ── Transitions ─────────────────────────────────────────────── */
-.bar-enter-active, .bar-leave-active { transition: transform .2s ease, opacity .2s ease; }
-.bar-enter-from, .bar-leave-to { transform: translateY(100%); opacity: 0; }
+.leg-pick-col { min-width: 36px; flex-shrink: 0; display: flex; justify-content: center; padding-top: 1px; }
+.leg-pick { font-size: 11px; font-weight: 700; padding: 3px 7px; border-radius: 4px; white-space: nowrap; }
 
-.sheet-enter-active, .sheet-leave-active { transition: opacity .2s ease; }
-.sheet-enter-from, .sheet-leave-to { opacity: 0; }
-.sheet-enter-active .sheet, .sheet-leave-active .sheet { transition: transform .25s cubic-bezier(.32,0,.67,0); }
-.sheet-enter-from .sheet, .sheet-leave-to .sheet { transform: translateY(100%); }
+.leg-odds-col { min-width: 40px; flex-shrink: 0; text-align: right; }
+.leg-odds { font-family: var(--font-disp); font-size: 17px; font-weight: 700; line-height: 1; letter-spacing: -.2px; color: var(--primary); }
+
+.tag-win  { background: color-mix(in srgb, var(--primary) 14%, transparent); color: var(--primary); }
+.tag-draw { background: color-mix(in srgb, #f59e0b 14%, transparent); color: #d97706; }
+.tag-lose { background: color-mix(in srgb, var(--green, #22c55e) 14%, transparent); color: var(--green, #22c55e); }
+.tag-neutral { background: var(--bg); color: var(--text2); }
+
+.scheme-divider { border: none; border-top: 1.5px dashed var(--line); margin: 0; }
+
+.scheme-stats {
+  display: flex; align-items: stretch; padding: 13px 14px;
+  background: color-mix(in srgb, var(--primary) 2%, var(--bg));
+}
+.stat-cell { flex: 1; display: flex; flex-direction: column; gap: 4px; }
+.stat-cell:not(:first-child) { padding-left: 14px; }
+.stat-label { font-size: 11px; color: var(--text3); }
+.stat-val { font-size: 19px; font-weight: 700; line-height: 1; font-family: var(--font-disp); letter-spacing: -.2px; }
+.stat-sep { width: 1px; background: var(--line); margin: 0 6px; align-self: stretch; }
+
+/* Win probability bar */
+.win-prob-bar-wrap { padding: 10px 14px; border-top: var(--card-bd); }
+.win-prob-label { display: flex; justify-content: space-between; font-size: 11px; color: var(--text3); margin-bottom: 6px; }
+.win-prob-track { height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; }
+.win-prob-fill { height: 100%; background: var(--primary); border-radius: 2px; transition: width .4s ease; }
+
+.scheme-rationale { padding: 0 14px 12px; border-top: var(--card-bd); }
+.rationale-header { display: flex; align-items: center; gap: 6px; padding: 10px 0 6px; }
+.rationale-label { font-size: 11px; color: var(--text3); font-family: var(--font-disp); }
+.rationale-body {
+  font-size: 12px; color: var(--text2); line-height: 1.65;
+  background: var(--primary-d); border-left: 2px solid var(--primary);
+  padding: 8px 10px; border-radius: 0 5px 5px 0;
+}
+
+/* ── Shared ─────────────────────────────────────────────────── */
+.empty-tip { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 60px 20px; text-align: center; }
+
+.fade-enter-active, .fade-leave-active { transition: opacity .2s ease; }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
 </style>

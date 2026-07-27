@@ -10,12 +10,33 @@ from db.session import get_db
 
 router = APIRouter()
 
+# 模型列表 registry — 在这里更新，无需重建前端
+PROVIDER_MODELS: dict[str, list[str]] = {
+    "claude":   ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5-20251001",
+                 "claude-3-5-sonnet-20241022", "claude-3-opus-20240229"],
+    "openai":   ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "o1", "o1-mini", "o3-mini", "o4-mini"],
+    "gemini":   ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash"],
+    "deepseek": ["deepseek-chat", "deepseek-reasoner"],
+    "kimi":     ["moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"],
+    "glm":      ["glm-4-flash", "glm-4-air", "glm-4", "glm-z1-flash", "glm-z1-air"],
+    "custom":   [],
+}
+
 
 class LLMConfigCreate(BaseModel):
     name: str
     provider: str
     model: str
     api_key: str
+    base_url: str | None = None
+    is_default: bool = False
+
+
+class LLMConfigUpdate(BaseModel):
+    name: str
+    provider: str
+    model: str
+    api_key: str | None = None  # None = keep existing key
     base_url: str | None = None
     is_default: bool = False
 
@@ -50,6 +71,12 @@ class DataSourceConfigOut(BaseModel):
 
 
 # ── LLM 配置 ─────────────────────────────────────────────────────────────────
+
+@router.get("/llm/models")
+async def list_provider_models(provider: str):
+    """返回指定 provider 的内置模型列表（无需认证，供前端 datalist 使用）"""
+    return PROVIDER_MODELS.get(provider, [])
+
 
 @router.get("/llm", response_model=list[LLMConfigOut])
 async def list_llm_configs(
@@ -95,6 +122,46 @@ async def create_llm_config(
     return config
 
 
+@router.put("/llm/{config_id}", response_model=LLMConfigOut)
+async def update_llm_config(
+    config_id: int,
+    data: LLMConfigUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    result = await db.execute(
+        select(LLMConfigModel).where(
+            LLMConfigModel.id == config_id,
+            LLMConfigModel.user_id == current_user.id,
+        )
+    )
+    cfg = result.scalar_one_or_none()
+    if not cfg:
+        raise HTTPException(status_code=404, detail="配置不存在")
+    if data.provider not in PROVIDER_DEFAULTS:
+        raise HTTPException(status_code=400, detail=f"不支持的 provider: {data.provider}")
+    if data.is_default:
+        existing = await db.execute(
+            select(LLMConfigModel).where(
+                LLMConfigModel.user_id == current_user.id,
+                LLMConfigModel.is_default == True,
+                LLMConfigModel.id != config_id,
+            )
+        )
+        for c in existing.scalars().all():
+            c.is_default = False
+    cfg.name = data.name
+    cfg.provider = LLMProvider(data.provider)
+    cfg.model = data.model
+    if data.api_key:  # only overwrite when user explicitly provides a new key
+        cfg.api_key = data.api_key
+    cfg.base_url = data.base_url
+    cfg.is_default = data.is_default
+    await db.commit()
+    await db.refresh(cfg)
+    return cfg
+
+
 @router.post("/llm/{config_id}/test")
 async def test_llm_config(
     config_id: int,
@@ -133,6 +200,45 @@ async def delete_llm_config(
     )
     await db.commit()
     return {"ok": True}
+
+
+@router.get("/llm/{config_id}/models")
+async def fetch_live_models(
+    config_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """用已保存配置的 API Key 向 provider 实时拉取可用模型列表"""
+    result = await db.execute(
+        select(LLMConfigModel).where(
+            LLMConfigModel.id == config_id,
+            LLMConfigModel.user_id == current_user.id,
+        )
+    )
+    cfg = result.scalar_one_or_none()
+    if not cfg:
+        raise HTTPException(status_code=404, detail="配置不存在")
+
+    provider = cfg.provider.value
+    # Claude 不暴露 /models 端点，直接返回内置列表
+    if provider == "claude":
+        return PROVIDER_MODELS.get("claude", [])
+
+    # OpenAI 兼容 provider 均支持 GET /models
+    try:
+        from openai import AsyncOpenAI
+        defaults = PROVIDER_DEFAULTS.get(provider, {})
+        base_url = cfg.base_url or defaults.get("base_url")
+        client = AsyncOpenAI(api_key=cfg.api_key, base_url=base_url)
+        resp = await client.models.list()
+        ids = [m.id for m in resp.data]
+        # 过滤掉 embedding / tts / image 等非对话模型
+        skip = {"embed", "text-embedding", "tts", "whisper", "dall", "babbage", "davinci", "ada", "curie"}
+        filtered = [m for m in ids if not any(k in m.lower() for k in skip)]
+        return sorted(filtered) or ids
+    except Exception:
+        # API 调用失败时降级到内置列表
+        return PROVIDER_MODELS.get(provider, [])
 
 
 # ── 数据源配置 ────────────────────────────────────────────────────────────────

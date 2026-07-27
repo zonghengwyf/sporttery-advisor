@@ -1,7 +1,7 @@
 import logging
 from datetime import date
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,6 +17,7 @@ router = APIRouter()
 class MatchOut(BaseModel):
     id: int
     sporttery_id: str
+    match_no: str | None = None
     home_team: str
     away_team: str
     league: str
@@ -45,12 +46,11 @@ async def list_matches(
     )
     matches = result.scalars().all()
 
-    # 无数据时自动从竞彩官方接口拉取
-    if not matches:
+    # 仅今日无数据时才自动同步，其他日期不触发（防止被非认证请求滥用）
+    if not matches and sale_date == str(date.today()):
         try:
             from core.data.sync import sync_daily_matches
-            target = date.fromisoformat(sale_date)
-            n = await sync_daily_matches(db, target)
+            n = await sync_daily_matches(db, date.today())
             if n > 0:
                 result = await db.execute(
                     select(Match).where(Match.sale_date == sale_date).order_by(Match.kickoff_at)
@@ -115,7 +115,7 @@ async def set_match_result(
                 match_id=match_id,
                 predicted=pred.fused_probs or pred.stat_probs,
                 actual=body.actual_result,
-                user_id=pred.user_id or 0,
+                user_id=pred.user_id,
             )
             snap.close()
         except Exception as exc:
@@ -127,19 +127,13 @@ async def set_match_result(
 
 @router.post("/sync")
 async def trigger_sync(
-    background_tasks: BackgroundTasks,
     sale_date: str = Query(default=str(date.today())),
     current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
-    """手动触发赛单同步（登录用户均可）。"""
+    """手动触发赛单同步（等同步完成后再返回）。"""
     from core.data.sync import sync_daily_matches
-    from db.session import AsyncSessionLocal
 
     target = date.fromisoformat(sale_date)
-
-    async def _bg():
-        async with AsyncSessionLocal() as session:
-            await sync_daily_matches(session, target)
-
-    background_tasks.add_task(_bg)
-    return {"message": f"已触发 {sale_date} 赛单同步，后台执行中"}
+    n = await sync_daily_matches(db, target)
+    return {"message": f"同步完成：{sale_date}，共 {n} 场", "count": n}

@@ -180,27 +180,29 @@ class TicketGenerator:
             t = pred.tickets
             label = pred.risk_label or "guarded"
             weight = _RISK_WEIGHT.get(label, 0.5)
+            # inject match_id so tickets.py enrichment can look up league
+            base = {"match_id": pred.match_id}
 
             if weight >= 0.7 and t.get("conservative_leg"):
                 leg = t["conservative_leg"]
                 if isinstance(leg, dict):
-                    mainline_legs.append(leg)
+                    mainline_legs.append({**base, **leg})
 
             if weight >= 0.4 and t.get("balanced_leg"):
                 leg = t["balanced_leg"]
                 if isinstance(leg, dict):
-                    balanced_legs.append(leg)
+                    balanced_legs.append({**base, **leg})
 
             if t.get("high_odds_leg"):
                 leg = t["high_odds_leg"]
                 if isinstance(leg, dict):
-                    high_odds_legs.append(leg)
+                    high_odds_legs.append({**base, **leg})
 
             for sl in t.get("scoreline_legs", []):
                 if isinstance(sl, str):
-                    scoreline_legs.append({"pick": sl})
+                    scoreline_legs.append({**base, "pick": sl})
                 elif isinstance(sl, dict):
-                    scoreline_legs.append(sl)
+                    scoreline_legs.append({**base, **sl})
 
         allocation = self._allocate(budget)
         return {
@@ -346,6 +348,14 @@ class TicketGenerator:
                 continue
             plan = _build_plan(plan_id, name, legs, base_stake, multiplier, budget)
             plans.append(plan)
+
+        # 用 Kelly 动态更新每个方案的 total_stake
+        if plans:
+            kelly_stakes = kelly_allocate(plans, budget)
+            for plan in plans:
+                stake = kelly_stakes.get(plan.plan_id, plan.base_stake * plan.multiplier)
+                plan.total_stake = stake
+                plan.theoretical_prize = round(stake * plan.total_odds, 1)
 
         return plans
 
@@ -549,6 +559,63 @@ def _build_plan(
         theoretical_prize=theoretical_prize,
         win_probability=win_prob,
     )
+
+
+def kelly_fraction(win_prob: float, total_odds: float, kelly_factor: float = 0.25) -> float:
+    """
+    Fractional Kelly criterion for a single parlay.
+
+    win_prob:    estimated probability the parlay wins
+    total_odds:  combined decimal odds of the parlay
+    kelly_factor: fraction of full Kelly to use (default 1/4 for safety)
+
+    Returns a non-negative fraction of bankroll to stake.
+    """
+    b = total_odds - 1.0
+    if b <= 0 or win_prob <= 0:
+        return 0.0
+    full_kelly = (win_prob * b - (1.0 - win_prob)) / b
+    return max(0.0, full_kelly * kelly_factor)
+
+
+def kelly_allocate(plans: list, budget: float) -> dict[str, float]:
+    """
+    Allocate budget across parlay plans using Kelly fractions.
+
+    Plans with zero Kelly fraction receive the minimum 2-yuan stake.
+    Remaining budget is split proportionally among plans with positive Kelly.
+    Returns {plan_id: stake}.
+    """
+    min_stake = 2.0  # 竞彩最低每注
+    fractions: dict[str, float] = {}
+
+    for plan in plans:
+        f = kelly_fraction(plan.win_probability, plan.total_odds)
+        fractions[plan.plan_id] = f
+
+    total_fraction = sum(fractions.values())
+    allocation: dict[str, float] = {}
+
+    if total_fraction <= 0:
+        # 所有方案 Kelly 为 0，均分预算（至少 min_stake）
+        per_plan = max(min_stake, budget / max(len(plans), 1))
+        return {p.plan_id: round(per_plan, 1) for p in plans}
+
+    n = len(plans)
+    # 若预算不足覆盖所有方案最低注额，按比例压缩
+    if budget < min_stake * n:
+        per_plan = round(budget / n, 1)
+        return {p.plan_id: per_plan for p in plans}
+
+    reserved = min_stake * n
+    distributable = budget - reserved
+
+    for plan in plans:
+        f = fractions[plan.plan_id]
+        extra = distributable * (f / total_fraction)
+        allocation[plan.plan_id] = round(min_stake + extra, 1)
+
+    return allocation
 
 
 def _score_to_stars(score: int) -> int:

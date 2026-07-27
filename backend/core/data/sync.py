@@ -52,6 +52,7 @@ async def sync_daily_matches(session: AsyncSession, target_date: date) -> int:
         if match is None:
             match = Match(
                 sporttery_id=row["sporttery_id"],
+                match_no=row.get("match_no") or None,
                 home_team=row["home_team"],
                 away_team=row["away_team"],
                 league=row["league"],
@@ -66,6 +67,7 @@ async def sync_daily_matches(session: AsyncSession, target_date: date) -> int:
         else:
             match.sporttery_odds = stored_odds
             match.available_markets = available
+            match.match_no = row.get("match_no") or match.match_no
             match.updated_at = datetime.utcnow()
 
         upserted += 1

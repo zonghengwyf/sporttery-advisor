@@ -72,6 +72,7 @@ class Match(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     sporttery_id: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
+    match_no: Mapped[str | None] = mapped_column(String(20))  # 竞彩场次编号，如 "026001"
     home_team: Mapped[str] = mapped_column(String(100), nullable=False)
     away_team: Mapped[str] = mapped_column(String(100), nullable=False)
     league: Mapped[str] = mapped_column(String(100), nullable=False)

@@ -18,6 +18,7 @@ _MIGRATIONS = [
     "ALTER TABLE matches ADD COLUMN IF NOT EXISTS actual_result VARCHAR(1)",
     "ALTER TABLE matches ADD COLUMN IF NOT EXISTS actual_score VARCHAR(10)",
     "ALTER TABLE predictions ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)",
+    "ALTER TABLE matches ADD COLUMN IF NOT EXISTS match_no VARCHAR(20)",
 ]
 
 

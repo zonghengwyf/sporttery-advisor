@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
+from datetime import datetime
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -16,24 +18,122 @@ class SnapshotManager:
         self._init_tables()
 
     def _init_tables(self):
+        from core.modeling.model_registry import ModelRegistry
+        ModelRegistry(self.db_path).init_table()
+
         import duckdb
         con = duckdb.connect(self.db_path)
         try:
             con.execute("CREATE SEQUENCE IF NOT EXISTS backtest_seq START 1")
+            con.execute("CREATE SEQUENCE IF NOT EXISTS prediction_seq START 1")
             con.execute("""
-                CREATE TABLE IF NOT EXISTS backtest_results (
-                    id          INTEGER DEFAULT nextval('backtest_seq') PRIMARY KEY,
-                    match_id    INTEGER NOT NULL,
-                    user_id     INTEGER NOT NULL DEFAULT 0,
-                    p_home      FLOAT   NOT NULL,
-                    p_draw      FLOAT   NOT NULL,
-                    p_away      FLOAT   NOT NULL,
-                    actual      VARCHAR(1) NOT NULL,
-                    recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                CREATE TABLE IF NOT EXISTS prediction_snapshots (
+                    id           INTEGER DEFAULT nextval('prediction_seq') PRIMARY KEY,
+                    match_id     INTEGER   NOT NULL,
+                    run_id       TEXT      NOT NULL,
+                    kickoff_at   TEXT,
+                    stat_probs   TEXT,
+                    fused_probs  TEXT,
+                    intel_summary TEXT,
+                    risk_label   TEXT,
+                    confidence   FLOAT,
+                    recorded_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            con.execute("""
+                CREATE TABLE IF NOT EXISTS backtest_results (
+                    id           INTEGER DEFAULT nextval('backtest_seq') PRIMARY KEY,
+                    match_id     INTEGER   NOT NULL,
+                    user_id      INTEGER   NOT NULL DEFAULT 0,
+                    p_home       FLOAT     NOT NULL,
+                    p_draw       FLOAT     NOT NULL,
+                    p_away       FLOAT     NOT NULL,
+                    actual       VARCHAR(1) NOT NULL,
+                    home_odds    FLOAT,
+                    draw_odds    FLOAT,
+                    away_odds    FLOAT,
+                    observed_at  TIMESTAMP,
+                    as_of        TIMESTAMP,
+                    kickoff_at   TIMESTAMP,
+                    recorded_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            # Forward-compatible migration: add columns to existing tables
+            for col, typedef in [
+                ("observed_at", "TIMESTAMP"),
+                ("as_of",       "TIMESTAMP"),
+                ("kickoff_at",  "TIMESTAMP"),
+                ("home_odds",   "FLOAT"),
+                ("draw_odds",   "FLOAT"),
+                ("away_odds",   "FLOAT"),
+            ]:
+                try:
+                    con.execute(
+                        f"ALTER TABLE backtest_results ADD COLUMN {col} {typedef}"
+                    )
+                except Exception:
+                    pass  # column already exists
         finally:
             con.close()
+
+    # ── 预测快照 ──────────────────────────────────────────────────────────────
+
+    async def save_prediction(
+        self,
+        match_id: int,
+        run_id: str,
+        kickoff_at: str,
+        stat_probs: dict,
+        fused_probs: dict,
+        intel_summary: str,
+        risk_label: str,
+        confidence: float,
+    ) -> None:
+        db_path = self.db_path
+        stat_json   = json.dumps(stat_probs)
+        fused_json  = json.dumps(fused_probs)
+
+        def _insert():
+            import duckdb
+            con = duckdb.connect(db_path)
+            try:
+                con.execute(
+                    """
+                    INSERT INTO prediction_snapshots
+                        (match_id, run_id, kickoff_at, stat_probs, fused_probs,
+                         intel_summary, risk_label, confidence)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [match_id, run_id, kickoff_at,
+                     stat_json, fused_json,
+                     intel_summary, risk_label, confidence],
+                )
+            finally:
+                con.close()
+
+        await asyncio.to_thread(_insert)
+
+    # ── 时间约束验证 ──────────────────────────────────────────────────────────
+
+    @staticmethod
+    def validate_event_time(
+        observed_at: datetime | None,
+        as_of: datetime | None,
+        kickoff_at: datetime | None,
+    ) -> None:
+        """
+        Enforce: observed_at ≤ as_of < kickoff_at.
+        Prevents future data from leaking into predictions (look-ahead bias).
+        Skips validation when any timestamp is None.
+        """
+        if observed_at and as_of and observed_at > as_of:
+            raise ValueError(
+                f"observed_at ({observed_at}) must be ≤ as_of ({as_of})"
+            )
+        if as_of and kickoff_at and as_of >= kickoff_at:
+            raise ValueError(
+                f"as_of ({as_of}) must be < kickoff_at ({kickoff_at})"
+            )
 
     # ── 写入 ──────────────────────────────────────────────────────────────────
 
@@ -43,12 +143,23 @@ class SnapshotManager:
         predicted: dict,
         actual: str,
         user_id: int = 0,
+        observed_at: datetime | None = None,
+        as_of: datetime | None = None,
+        kickoff_at: datetime | None = None,
+        market_odds: dict | None = None,
     ) -> None:
+        self.validate_event_time(observed_at, as_of, kickoff_at)
+
         p_home = float(predicted.get("home", 0.33))
         p_draw = float(predicted.get("draw", 0.33))
         p_away = float(predicted.get("away", 0.34))
-        total = p_home + p_draw + p_away or 1.0
+        total = max(p_home + p_draw + p_away, 1e-9)
         p_home, p_draw, p_away = p_home / total, p_draw / total, p_away / total
+
+        h_odds = float(market_odds["home"]) if market_odds and market_odds.get("home") else None
+        d_odds = float(market_odds["draw"]) if market_odds and market_odds.get("draw") else None
+        a_odds = float(market_odds["away"]) if market_odds and market_odds.get("away") else None
+
         db_path = self.db_path
 
         def _insert():
@@ -61,9 +172,14 @@ class SnapshotManager:
                     [match_id, user_id],
                 )
                 con.execute(
-                    "INSERT INTO backtest_results (match_id, user_id, p_home, p_draw, p_away, actual)"
-                    " VALUES (?, ?, ?, ?, ?, ?)",
-                    [match_id, user_id, p_home, p_draw, p_away, actual],
+                    "INSERT INTO backtest_results"
+                    " (match_id, user_id, p_home, p_draw, p_away, actual,"
+                    "  home_odds, draw_odds, away_odds,"
+                    "  observed_at, as_of, kickoff_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    [match_id, user_id, p_home, p_draw, p_away, actual,
+                     h_odds, d_odds, a_odds,
+                     observed_at, as_of, kickoff_at],
                 )
             finally:
                 con.close()
@@ -132,6 +248,36 @@ class SnapshotManager:
             return {"dates": dates, "brier_series": brier_series, "baseline_series": baseline_series}
 
         return await asyncio.to_thread(_compute)
+
+    async def get_devig_historical(self, limit: int = 60) -> list[dict]:
+        """
+        返回最近 N 条含赔率的回测记录，供 select_devig_method() 选择最优去水差方法。
+        """
+        db_path = self.db_path
+
+        def _query():
+            import duckdb
+            con = duckdb.connect(db_path, read_only=True)
+            try:
+                rows = con.execute(
+                    f"""
+                    SELECT home_odds, draw_odds, away_odds, actual
+                    FROM backtest_results
+                    WHERE home_odds IS NOT NULL
+                      AND draw_odds IS NOT NULL
+                      AND away_odds IS NOT NULL
+                    ORDER BY recorded_at DESC
+                    LIMIT {int(limit)}
+                    """
+                ).fetchall()
+            finally:
+                con.close()
+            return [
+                {"home_odds": r[0], "draw_odds": r[1], "away_odds": r[2], "actual": r[3]}
+                for r in rows
+            ]
+
+        return await asyncio.to_thread(_query)
 
     def close(self):
         pass  # 连接已在每次操作后关闭，无需集中释放

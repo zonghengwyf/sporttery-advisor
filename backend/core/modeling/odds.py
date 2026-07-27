@@ -104,6 +104,57 @@ def remove_vig(
     )
 
 
+def select_devig_method(
+    historical: list[dict],
+    min_samples: int = 20,
+) -> OddsMethod:
+    """
+    Pick the devig method with lowest log-loss on historical observations.
+
+    Each entry in `historical` must have:
+      home_odds, draw_odds, away_odds  (decimal)
+      actual  ("H" | "D" | "A")
+
+    Falls back to "power" when insufficient data.
+    """
+    if len(historical) < min_samples:
+        return "power"
+
+    import math
+    eps = 1e-9
+    outcome_key = {"H": "home", "D": "draw", "A": "away"}
+    methods: list[OddsMethod] = ["multiplicative", "power", "shin"]
+    best_method: OddsMethod = "power"
+    best_loss = float("inf")
+
+    for method in methods:
+        total_loss = 0.0
+        for obs in historical:
+            odds = {
+                "home": float(obs["home_odds"]),
+                "draw": float(obs["draw_odds"]),
+                "away": float(obs["away_odds"]),
+            }
+            try:
+                result = remove_vig(odds, method=method)
+            except Exception:
+                total_loss += 10.0
+                continue
+            raw_actual = obs.get("actual", "")
+            actual_key = outcome_key.get(raw_actual)
+            if actual_key is None:
+                continue  # skip observations with unrecognized outcome
+            p = result.fair_probs.get(actual_key, eps)
+            total_loss += -math.log(max(p, eps))
+
+        avg_loss = total_loss / len(historical)
+        if avg_loss < best_loss:
+            best_loss = avg_loss
+            best_method = method
+
+    return best_method
+
+
 @dataclass
 class ValueAssessment:
     outcome: str
