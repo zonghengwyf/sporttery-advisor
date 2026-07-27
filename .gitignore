@@ -21,8 +21,8 @@ node_modules/
 frontend/dist/
 frontend/.vite/
 
-# 数据文件
-data/
+# 数据文件（/data 仅匹配根目录，不影响 backend/core/data 等源码目录）
+/data/
 *.duckdb
 *.duckdb.wal
 

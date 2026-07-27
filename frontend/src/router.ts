@@ -12,6 +12,7 @@ const router = createRouter({
         { path: 'analysis', component: () => import('@/views/DailyAnalysis.vue') },
         { path: 'matches/:id', component: () => import('@/views/MatchDetail.vue') },
         { path: 'tickets', component: () => import('@/views/BettingTickets.vue') },
+        { path: 'records', component: () => import('@/views/BetRecord.vue') },
         { path: 'backtest', component: () => import('@/views/BacktestReport.vue') },
         { path: 'chat', component: () => import('@/views/ChatAnalysis.vue') },
         { path: 'settings', component: () => import('@/views/Settings.vue') },
@@ -22,7 +23,7 @@ const router = createRouter({
 
 router.beforeEach((to, _from, next) => {
   const token = localStorage.getItem('token')
-  const protectedPaths = ['/settings', '/chat']
+  const protectedPaths = ['/settings', '/chat', '/records', '/tickets']
   const needsAuth = protectedPaths.some(p => to.path.startsWith(p))
 
   if (to.path === '/login' && token) {

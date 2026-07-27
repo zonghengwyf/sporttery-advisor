@@ -10,7 +10,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from config import settings
-from workers.tasks import run_daily_analysis, run_daily_briefing
+from workers.tasks import run_daily_analysis, run_daily_briefing, sync_match_results
 
 logging.basicConfig(
     level=logging.INFO,
@@ -35,6 +35,14 @@ async def main():
         CronTrigger.from_crontab("30 8 * * *"),
         id="daily_briefing",
         name="每日早报 Webhook",
+        replace_existing=True,
+        misfire_grace_time=1800,
+    )
+    scheduler.add_job(
+        sync_match_results,
+        CronTrigger.from_crontab("0 * * * *"),  # 每整点执行一次
+        id="sync_results",
+        name="赛果同步 & 注单结算",
         replace_existing=True,
         misfire_grace_time=1800,
     )

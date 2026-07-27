@@ -21,6 +21,12 @@ class TicketsRequest(BaseModel):
     match_ids: list[int]
     budget: float | None = None
 
+    @property
+    def effective_budget(self) -> float:
+        if self.budget is None or self.budget <= 0:
+            return 100.0
+        return self.budget
+
 
 def _sse(event_type: str, **kwargs) -> str:
     return f"data: {json.dumps({'event': event_type, **kwargs})}\n\n"
@@ -95,6 +101,10 @@ async def generate_tickets(
                 logger.info("自动分析完成 match_id=%d", mid)
             except Exception as exc:
                 logger.warning("自动分析失败 match_id=%d: %s", mid, exc)
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
 
         await db.commit()
 
@@ -116,16 +126,13 @@ async def generate_tickets(
         raise HTTPException(status_code=422, detail="无法获取赛事数据")
 
     # ── 4. 生成串关方案 ───────────────────────────────────────────────────────
-    budget = req.budget or 100.0
+    budget = req.effective_budget
     from core.tickets.generator import TicketGenerator
     generator = TicketGenerator()
     plans = generator.generate_parlay_plans(enriched_preds, budget=budget)
 
     if not plans:
-        raise HTTPException(
-            status_code=422,
-            detail="无法生成投注方案：所选赛事可能缺少竞彩赔率数据，请确认赛事已在竞彩官网开售",
-        )
+        raise HTTPException(status_code=422, detail=_empty_plans_reason(enriched_preds))
 
     return _build_schemes(plans, enriched_preds)
 
@@ -209,6 +216,10 @@ async def stream_tickets(
                         logger.info("SSE 自动分析完成 match_id=%d", mid)
                     except Exception as exc:
                         logger.warning("SSE 自动分析失败 match_id=%d: %s", mid, exc)
+                        try:
+                            await db.rollback()
+                        except Exception:
+                            pass
 
                 await db.commit()
 
@@ -233,16 +244,13 @@ async def stream_tickets(
             # 3 — 生成串关方案
             yield _sse("step", step="ticket", msg="筛选票型 & 分配资金…", index=3, total=4)
 
-            budget = req.budget or 100.0
+            budget = req.effective_budget
             from core.tickets.generator import TicketGenerator
             gen = TicketGenerator()
             plans = gen.generate_parlay_plans(enriched_preds, budget=budget)
 
             if not plans:
-                yield _sse(
-                    "error",
-                    msg="无法生成投注方案：所选赛事可能缺少竞彩赔率数据，请确认赛事已在竞彩官网开售",
-                )
+                yield _sse("error", msg=_empty_plans_reason(enriched_preds))
                 return
 
             schemes = _build_schemes(plans, enriched_preds)
@@ -250,7 +258,7 @@ async def stream_tickets(
 
         except Exception as exc:
             logger.error("stream_tickets 未处理异常: %s", exc, exc_info=True)
-            yield _sse("error", msg=f"服务器内部错误：{exc}")
+            yield _sse("error", msg="服务器内部错误，请稍后重试")
 
     return StreamingResponse(
         _generate(),
@@ -317,6 +325,33 @@ def _risk_label_for(key: str) -> str:
     }.get(key, "中风险")
 
 
+def _empty_plans_reason(enriched_preds: list[dict]) -> str:
+    """根据实际数据生成准确的失败原因描述。"""
+    no_odds = [
+        f"{ep['match'].home_team} vs {ep['match'].away_team}"
+        for ep in enriched_preds
+        if not ep["match"].sporttery_odds
+    ]
+    if no_odds:
+        return (
+            "无法生成投注方案：所选赛事缺少胜平负赔率，请先在今日分析页同步赛单"
+            f"（缺少赔率：{'、'.join(no_odds)}）"
+        )
+
+    avoid_matches = [
+        f"{ep['match'].home_team} vs {ep['match'].away_team}"
+        for ep in enriched_preds
+        if ep["prediction"] and ep["prediction"].risk_label == "avoid"
+    ]
+    if avoid_matches:
+        return (
+            f"AI 分析建议回避所有所选场次（{'、'.join(avoid_matches)}），"
+            "无法组成有效串关。建议重新选择赛事或在单场详情页重新触发分析。"
+        )
+
+    return "无法生成投注方案：所选赛事数据不完整，请重新同步赛单后再试"
+
+
 @router.get("/match/{match_id}")
 async def get_match_tickets(
     match_id: int,
@@ -332,5 +367,5 @@ async def get_match_tickets(
     )
     pred = result.scalar_one_or_none()
     if not pred or not pred.tickets:
-        return None
+        raise HTTPException(status_code=404, detail="该场次暂无票型数据")
     return pred.tickets

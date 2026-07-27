@@ -86,6 +86,7 @@ class Match(Base):
     tournament_context: Mapped[dict | None] = mapped_column(JSON)  # 出线形势等
     actual_result: Mapped[str | None] = mapped_column(String(1))   # H/D/A（赛后录入）
     actual_score: Mapped[str | None] = mapped_column(String(10))   # "2-1" 格式
+    result_locked: Mapped[bool] = mapped_column(Boolean, default=False)  # 结算后禁止覆盖
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -124,3 +125,23 @@ class ChatSession(Base):
     messages: Mapped[list] = mapped_column(JSON, default=list)  # [{role, content, ts}]
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class BetRecord(Base):
+    """用户真正投注的记录（区别于 AI 分析的 Prediction）"""
+    __tablename__ = "bet_records"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    prediction_id: Mapped[int | None] = mapped_column(ForeignKey("predictions.id"), nullable=True)
+    plan_id: Mapped[str] = mapped_column(String(20), nullable=False)  # conservative/balanced/high_odds/manual
+    # legs: [{match_id, home_team, away_team, pick, pick_code, odds, void}]
+    legs: Mapped[list] = mapped_column(JSON, nullable=False)
+    stake: Mapped[float] = mapped_column(Float, nullable=False)
+    expected_payout: Mapped[float | None] = mapped_column(Float)   # stake × total_odds（下注时锁定）
+    effective_odds: Mapped[float | None] = mapped_column(Float)    # void 关移除后赔率（结算时更新）
+    bet_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    status: Mapped[str] = mapped_column(String(10), default="pending")  # pending/won/lost/void
+    payout: Mapped[float | None] = mapped_column(Float)
+    note: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

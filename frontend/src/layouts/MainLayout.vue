@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { useRouter, useRoute } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
+import ChatFab from '@/components/ChatFab.vue'
 
 const router = useRouter()
 const route = useRoute()
@@ -10,7 +11,7 @@ const nav = [
   { path: '/analysis', label: '赛事' },
   { path: '/tickets',  label: '方案' },
   { path: '/chat',     label: 'AI 分析' },
-  { path: '/backtest', label: '回测' },
+  { path: '/records',  label: '战绩' },
   { path: '/settings', label: '设置' },
 ]
 
@@ -53,6 +54,9 @@ function isActive(path: string) {
     <RouterView />
   </main>
 
+  <!-- Global AI Chat FAB -->
+  <ChatFab />
+
   <!-- Mobile bottom nav (hidden on PC) -->
   <nav class="bottom-nav" aria-label="移动端导航">
     <button
@@ -75,8 +79,9 @@ function isActive(path: string) {
       <svg v-else-if="item.path === '/tickets'" width="22" height="22" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <rect x="3" y="3" width="14" height="14" rx="2"/><path d="M7 10h6M7 7h6M7 13h4"/>
       </svg>
-      <svg v-else-if="item.path === '/backtest'" width="22" height="22" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M3 15l4-8 3.5 7 3-5 3.5 6"/>
+      <!-- /records: trophy cup icon -->
+      <svg v-else-if="item.path === '/records'" width="22" height="22" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M6 3h8M7 3v4a3 3 0 0 0 6 0V3M5 4H3a2 2 0 0 0 0 4h2M15 4h2a2 2 0 0 0 0 4h-2M10 10v7M7 17h6"/>
       </svg>
       <svg v-else-if="item.path === '/settings'" width="22" height="22" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <circle cx="10" cy="10" r="2.5"/>

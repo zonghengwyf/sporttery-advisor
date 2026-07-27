@@ -1,10 +1,15 @@
 import logging
 from contextlib import asynccontextmanager
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(name)s %(levelname)s %(message)s",
+)
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api import auth, backtest, chat, daily, matches, predictions, public, settings, tickets
+from api import auth, backtest, bets, chat, daily, matches, predictions, public, settings, tickets
 from db.session import init_db
 
 logger = logging.getLogger(__name__)
@@ -32,6 +37,7 @@ app.add_middleware(
 )
 
 app.include_router(auth.router,        prefix="/api/auth",        tags=["auth"])
+app.include_router(bets.router,        prefix="/api/bets",        tags=["bets"])
 app.include_router(matches.router,     prefix="/api/matches",     tags=["matches"])
 app.include_router(predictions.router, prefix="/api/predictions", tags=["predictions"])
 app.include_router(tickets.router,     prefix="/api/tickets",     tags=["tickets"])

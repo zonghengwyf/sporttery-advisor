@@ -143,6 +143,122 @@ async def run_daily_briefing():
         await session.close()
 
 
+async def sync_match_results():
+    """
+    扫描已结束但 actual_result 为空的比赛，尝试同步赛果。
+    降级链：竞彩 API → The Odds API /scores → 跳过（等人工录入）。
+    同步成功后更新关联 BetRecord 的结算状态。
+    """
+    from datetime import datetime, timedelta
+    from sqlalchemy import select as sa_select, and_
+    from db.models import BetRecord, Match
+    from db.session import AsyncSessionLocal
+
+    now = datetime.utcnow()
+    cutoff = now - timedelta(hours=2, minutes=30)
+
+    logger.info("开始同步赛果，截止时间：%s", cutoff.isoformat())
+
+    async with AsyncSessionLocal() as session:
+        stmt = sa_select(Match).where(
+            and_(
+                Match.kickoff_at <= cutoff,
+                Match.actual_result.is_(None),
+                Match.result_locked == False,  # noqa: E712
+            )
+        )
+        result = await session.execute(stmt)
+        pending_matches = result.scalars().all()
+
+        if not pending_matches:
+            logger.info("无待结算赛事")
+            return
+
+        logger.info("待同步赛果场次：%d", len(pending_matches))
+        source_manager = await _get_source_manager()
+        updated = 0
+
+        for match in pending_matches:
+            actual = await _fetch_result(source_manager, match)
+            if actual is None:
+                continue
+
+            match.actual_result = actual
+            match.result_locked = True
+            updated += 1
+            logger.info("赛果同步 match_id=%d %s vs %s → %s",
+                        match.id, match.home_team, match.away_team, actual)
+
+            await _settle_bet_records(session, match, actual)
+
+        await session.commit()
+        logger.info("赛果同步完成：%d / %d 场", updated, len(pending_matches))
+
+
+async def _fetch_result(source_manager, match) -> str | None:
+    """尝试从多个数据源获取赛果，返回 H/D/A 或 None。"""
+    # 1. 竞彩 API
+    try:
+        result = await source_manager.get_match_result(match.sporttery_id)
+        if result:
+            return result
+    except Exception as exc:
+        logger.debug("竞彩 API 赛果失败 %s: %s", match.sporttery_id, exc)
+
+    # 2. The Odds API /scores（若配置了 odds_api_key）
+    try:
+        result = await source_manager.get_odds_api_result(match)
+        if result:
+            return result
+    except Exception as exc:
+        logger.debug("The Odds API 赛果失败: %s", exc)
+
+    return None
+
+
+async def _settle_bet_records(session, match, actual_result: str):
+    """根据已知赛果，结算关联该场次的待结算 BetRecord。"""
+    from sqlalchemy import select as sa_select
+    from db.models import BetRecord
+
+    outcome_map = {"H": "主胜", "D": "平局", "A": "客胜"}
+    actual_pick = outcome_map.get(actual_result)
+
+    result = await session.execute(
+        sa_select(BetRecord).where(BetRecord.status == "pending")
+    )
+    records = result.scalars().all()
+
+    for record in records:
+        # 检查该记录的 legs 里是否包含这场比赛
+        if not any(leg.get("match_id") == match.id for leg in record.legs):
+            continue
+
+        # 更新该腿结果，检查整注是否全中
+        all_settled = True
+        all_won = True
+        total_odds = 1.0
+        for leg in record.legs:
+            if leg.get("void"):
+                continue
+            if leg.get("match_id") == match.id:
+                won = leg.get("pick") == actual_pick
+                leg["actual_result"] = actual_result
+                leg["won"] = won
+                if not won:
+                    all_won = False
+            else:
+                if "won" not in leg:
+                    all_settled = False
+            total_odds *= leg.get("odds", 1.0)
+
+        if all_settled:
+            record.status = "won" if all_won else "lost"
+            if all_won:
+                record.payout = round(record.stake * total_odds, 2)
+            logger.info("BetRecord id=%d 结算完成 → %s", record.id, record.status)
+
+
 async def retrain_model(seasons: int = 3):
     """从 football-data.co.uk 下载历史数据并重新拟合 Dixon-Coles 模型。"""
     logger.info("开始重新训练模型，使用过去 %d 个赛季数据", seasons)

@@ -6,9 +6,12 @@ generate_parlay_plans → 新接口：返回 3 类串关方案（含场次编号
 """
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass, field
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 
 # 竞彩胜平负代码
@@ -18,7 +21,8 @@ _RISK_WEIGHT = {
     "mainline":    1.0,
     "guarded":     0.7,
     "upset_cover": 0.4,
-    "avoid":       0.0,
+    # avoid: 用户仍可选中，保留高赔腿，不参与稳健/均衡串关
+    "avoid":       0.15,
 }
 
 
@@ -255,18 +259,40 @@ class TicketGenerator:
             pred = item["prediction"]
             votes = item.get("ensemble_votes", [])
 
+            mid = getattr(match, "id", "?")
             if not pred or not pred.fused_probs:
-                continue
+                fp_fallback = pred.stat_probs if pred else None
+                if fp_fallback:
+                    logger.warning(
+                        "match_id=%s fused_probs 为空，降级使用 stat_probs", mid
+                    )
+                else:
+                    logger.warning(
+                        "match_id=%s 跳过：fused_probs 和 stat_probs 均为空 "
+                        "(pred=%s, fused_probs=%s)",
+                        mid, bool(pred), pred.fused_probs if pred else None,
+                    )
+                    continue
+                pred_fp = fp_fallback
+            else:
+                pred_fp = pred.fused_probs
 
             risk = pred.risk_label or "guarded"
             weight = _RISK_WEIGHT.get(risk, 0.5)
 
             # 跳过建议回避的比赛
             if weight == 0.0:
+                logger.info("match_id=%s 跳过：risk_label=%s (avoid)", mid, risk)
                 continue
 
-            fp = pred.fused_probs
+            fp = pred_fp
             tickets = pred.tickets or {}
+            logger.info(
+                "match_id=%s risk=%s weight=%.1f has_odds=%s conservative_leg=%s",
+                mid, risk, weight,
+                bool(getattr(match, "sporttery_odds", None)),
+                tickets.get("conservative_leg"),
+            )
             match_code = _extract_match_code(match)
 
             def _make_leg(pick_dict, pick_override: str | None = None) -> ParlayLeg | None:
@@ -285,6 +311,10 @@ class TicketGenerator:
                 odds_val = _odds_for_pick(match.sporttery_odds, primary_pick)
 
                 if odds_val is None or odds_val < 1.01:
+                    logger.warning(
+                        "match_id=%s _make_leg 返回 None：pick=%s odds_val=%s sporttery_odds=%s",
+                        mid, primary_pick, odds_val, match.sporttery_odds,
+                    )
                     return None
 
                 # 计算 AI 共识
@@ -330,6 +360,12 @@ class TicketGenerator:
                 leg = _make_leg(ho)
                 if leg:
                     high_odds_legs.append(leg)
+
+        logger.info(
+            "generate_parlay_plans 汇总：输入%d场 → 稳健腿%d 均衡腿%d 高赔腿%d",
+            len(enriched_predictions),
+            len(conservative_legs), len(balanced_legs), len(high_odds_legs),
+        )
 
         # 按赔率乘积潜力排序，取最优子集
         conservative_legs = _best_legs(conservative_legs, max_legs=5, strategy="safe")

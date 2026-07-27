@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import api from '@/api'
+import api, { betsApi } from '@/api'
 
 const router = useRouter()
 const route = useRoute()
@@ -188,6 +188,65 @@ function goCustomSelect() {
 function resetSchemes() {
   schemes.value = null
   error.value = null
+}
+
+// ── 标记投注 sheet ────────────────────────────────────────────────
+interface BetSheet {
+  visible: boolean
+  planId: string
+  stake: number
+  submitting: boolean
+  done: boolean
+  error: string | null
+}
+const betSheet = ref<BetSheet>({ visible: false, planId: '', stake: 20, submitting: false, done: false, error: null })
+
+function openBetSheet(planId: string) {
+  const scheme = schemes.value?.[planId as keyof typeof schemes.value] as { stake?: number } | undefined
+  betSheet.value = {
+    visible: true,
+    planId,
+    stake: scheme?.stake ?? 20,
+    submitting: false,
+    done: false,
+    error: null,
+  }
+}
+function closeBetSheet() {
+  betSheet.value.visible = false
+}
+
+async function confirmBet() {
+  const sheet = betSheet.value
+  if (sheet.submitting) return
+  const scheme = schemes.value?.[sheet.planId as keyof typeof schemes.value] as { legs?: any[]; total_odds?: number } | undefined
+  if (!scheme?.legs?.length) return
+
+  const legs = scheme.legs.map((leg: any) => ({
+    match_id: leg.match_id ?? 0,
+    home_team: leg.home_team,
+    away_team: leg.away_team,
+    pick: leg.pick,
+    pick_code: leg.pick_code ?? '',
+    odds: leg.odds ?? 1,
+  }))
+
+  sheet.submitting = true
+  sheet.error = null
+  try {
+    await betsApi.create({
+      plan_id: sheet.planId,
+      legs,
+      stake: sheet.stake,
+      expected_payout: Math.round(sheet.stake * (scheme.total_odds ?? 1) * 100) / 100,
+    })
+    sheet.done = true
+    setTimeout(() => { sheet.visible = false }, 1400)
+  } catch (e: any) {
+    sheet.error = e.response?.data?.detail ?? '提交失败，请稍后重试'
+  } finally {
+    sheet.submitting = false
+  }
 }
 
 onMounted(async () => {
@@ -431,6 +490,17 @@ onMounted(async () => {
           </div>
         </div>
 
+        <!-- Mark as bet button -->
+        <div class="bet-action-row">
+          <button class="bet-mark-btn" @click="openBetSheet(activeTab)">
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="8" cy="8" r="6.5"/>
+              <path d="M5.5 8l2 2 3-3"/>
+            </svg>
+            标记我已购买此方案
+          </button>
+        </div>
+
         <!-- AI rationale -->
         <div v-if="activeScheme.rationale" class="scheme-rationale">
           <div class="rationale-header">
@@ -449,6 +519,59 @@ onMounted(async () => {
     </div>
 
   </div>
+
+  <!-- ── 标记投注 Sheet ────────────────────────────────────────── -->
+  <Teleport to="body">
+    <Transition name="sheet">
+      <div v-if="betSheet.visible" class="sheet-backdrop" @click.self="closeBetSheet">
+        <div class="sheet-panel">
+          <!-- Success state -->
+          <div v-if="betSheet.done" class="sheet-done">
+            <svg width="36" height="36" viewBox="0 0 36 36" fill="none" stroke="#22c55e" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="18" cy="18" r="16"/>
+              <polyline points="11,18 16,23 25,13"/>
+            </svg>
+            <p>投注记录已保存</p>
+          </div>
+          <!-- Form state -->
+          <template v-else>
+            <div class="sheet-header">
+              <div class="sheet-title">标记投注 · {{ { conservative:'稳健', balanced:'均衡', high_odds:'博高赔', scoreline:'比分' }[betSheet.planId] || betSheet.planId }}方案</div>
+              <button class="sheet-close" @click="closeBetSheet">
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                  <path d="M1 1l12 12M13 1L1 13"/>
+                </svg>
+              </button>
+            </div>
+            <div class="sheet-body">
+              <p class="sheet-desc">记录您实际购买的注额，AI 将追踪命中情况</p>
+              <label class="sheet-label">投注金额（元）</label>
+              <div class="sheet-stake-row">
+                <button class="stake-adj" @click="betSheet.stake = Math.max(2, betSheet.stake - 2)">−</button>
+                <input
+                  v-model.number="betSheet.stake"
+                  class="stake-input"
+                  type="number"
+                  min="2"
+                  max="10000"
+                  step="2"
+                />
+                <button class="stake-adj" @click="betSheet.stake = Math.min(10000, betSheet.stake + 2)">+</button>
+              </div>
+              <div v-if="betSheet.error" class="sheet-error">{{ betSheet.error }}</div>
+            </div>
+            <div class="sheet-footer">
+              <button class="sheet-cancel" @click="closeBetSheet">取消</button>
+              <button class="sheet-confirm" :disabled="betSheet.submitting" @click="confirmBet">
+                <span v-if="betSheet.submitting" class="btn-spin" />
+                {{ betSheet.submitting ? '保存中…' : '确认已购买' }}
+              </button>
+            </div>
+          </template>
+        </div>
+      </div>
+    </Transition>
+  </Teleport>
 </template>
 
 <style scoped>
@@ -801,4 +924,148 @@ onMounted(async () => {
 
 .fade-enter-active, .fade-leave-active { transition: opacity .2s ease; }
 .fade-enter-from, .fade-leave-to { opacity: 0; }
+
+/* ── Bet action row ─────────────────────────────────────────── */
+.bet-action-row {
+  padding: 0 14px 14px;
+  border-top: var(--card-bd);
+}
+.bet-mark-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 11px;
+  border-radius: 7px;
+  font-size: 13px;
+  font-weight: 600;
+  font-family: var(--font);
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--primary) 25%, transparent);
+  cursor: pointer;
+  margin-top: 12px;
+  transition: background .12s, border-color .12s;
+  touch-action: manipulation;
+}
+.bet-mark-btn:hover { background: color-mix(in srgb, var(--primary) 14%, transparent); border-color: var(--primary); }
+.bet-mark-btn:active { opacity: .8; }
+
+/* ── Bet sheet ──────────────────────────────────────────────── */
+.sheet-backdrop {
+  position: fixed; inset: 0; z-index: 300;
+  background: rgba(0,0,0,.5);
+  display: flex; align-items: flex-end; justify-content: center;
+}
+@media (min-width: 600px) {
+  .sheet-backdrop { align-items: center; }
+}
+.sheet-panel {
+  width: min(420px, 100%);
+  background: var(--card);
+  border-radius: 16px 16px 0 0;
+  overflow: hidden;
+  padding-bottom: env(safe-area-inset-bottom, 0);
+}
+@media (min-width: 600px) {
+  .sheet-panel { border-radius: 14px; }
+}
+
+.sheet-enter-active { transition: opacity .2s ease, transform .2s ease; }
+.sheet-leave-active { transition: opacity .15s ease, transform .15s ease; }
+.sheet-enter-from { opacity: 0; transform: translateY(20px); }
+.sheet-leave-to   { opacity: 0; transform: translateY(12px); }
+@media (min-width: 600px) {
+  .sheet-enter-from, .sheet-leave-to { transform: scale(.97); }
+}
+
+.sheet-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 16px 12px;
+  border-bottom: var(--card-bd);
+}
+.sheet-title { font-size: 14px; font-weight: 700; }
+.sheet-close { background: transparent; color: var(--text3); cursor: pointer; padding: 4px; }
+
+.sheet-body { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+.sheet-desc { font-size: 12px; color: var(--text3); margin: 0; }
+.sheet-label { font-size: 12px; color: var(--text2); font-weight: 600; }
+.sheet-stake-row { display: flex; align-items: center; gap: 10px; }
+.stake-adj {
+  width: 36px; height: 36px;
+  border-radius: 8px;
+  background: var(--bg);
+  border: var(--card-bd);
+  color: var(--text);
+  font-size: 18px;
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+  transition: background .1s;
+}
+.stake-adj:hover { background: color-mix(in srgb, var(--primary) 10%, transparent); }
+.stake-input {
+  flex: 1;
+  background: var(--bg);
+  border: var(--card-bd);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 22px;
+  font-family: var(--font-disp);
+  font-weight: 700;
+  text-align: center;
+  padding: 8px;
+  outline: none;
+  min-width: 0;
+}
+.stake-input:focus { border-color: var(--primary); }
+.sheet-error { font-size: 12px; color: #ef4444; }
+
+.sheet-footer {
+  display: flex; gap: 10px;
+  padding: 12px 16px 16px;
+  border-top: var(--card-bd);
+}
+.sheet-cancel {
+  flex: 1;
+  padding: 12px;
+  border-radius: 8px;
+  border: var(--card-bd);
+  background: transparent;
+  color: var(--text2);
+  font-size: 14px;
+  cursor: pointer;
+  font-family: var(--font);
+}
+.sheet-confirm {
+  flex: 2;
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--primary);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  font-family: var(--font);
+  transition: opacity .12s;
+}
+.sheet-confirm:disabled { opacity: .5; cursor: not-allowed; }
+
+.sheet-done {
+  padding: 48px 20px;
+  display: flex; flex-direction: column; align-items: center; gap: 14px;
+  color: #22c55e;
+  font-size: 15px; font-weight: 700;
+}
+
+.btn-spin {
+  width: 14px; height: 14px;
+  border: 2px solid rgba(255,255,255,.4);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin .7s linear infinite;
+  display: inline-block;
+}
 </style>
