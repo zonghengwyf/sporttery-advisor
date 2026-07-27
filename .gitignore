@@ -41,3 +41,7 @@ Thumbs.db
 *.log
 logs/
 .gstack/
+
+# 设计评审产物（自动生成）
+designs/
+*.png
