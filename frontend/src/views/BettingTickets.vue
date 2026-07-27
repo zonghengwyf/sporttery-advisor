@@ -558,7 +558,7 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 8px 16px;
+  padding: 12px 16px;
   font-size: 13px;
   color: var(--text2);
   background: transparent;
