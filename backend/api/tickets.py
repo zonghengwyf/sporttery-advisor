@@ -278,17 +278,18 @@ def _build_schemes(plans, enriched_preds) -> dict:
         legs_out = []
         for leg in plan.legs:
             legs_out.append({
-                "match_id":   leg.match_id,
-                "match_no":   leg.match_code,
-                "home_team":  leg.home_team,
-                "away_team":  leg.away_team,
-                "kickoff":    leg.kickoff,
-                "league":     mid_to_league.get(leg.match_id, ""),
-                "pick":       leg.pick,
-                "pick_code":  leg.pick_code,
-                "odds":       leg.odds,
-                "confidence": round(leg.win_prob * 100, 1),
-                "rationale":  "",
+                "match_id":      leg.match_id,
+                "match_no":      leg.match_code,
+                "home_team":     leg.home_team,
+                "away_team":     leg.away_team,
+                "kickoff":       leg.kickoff,
+                "league":        mid_to_league.get(leg.match_id, ""),
+                "pick":          leg.pick,
+                "pick_code":     leg.pick_code,
+                "odds":          leg.odds,
+                "odds_estimated": leg.odds_estimated,
+                "confidence":    round(leg.win_prob * 100, 1),
+                "rationale":     "",
                 "model_votes": {
                     "agree":  leg.model_votes_agree,
                     "total":  leg.model_votes_total,
@@ -327,17 +328,6 @@ def _risk_label_for(key: str) -> str:
 
 def _empty_plans_reason(enriched_preds: list[dict]) -> str:
     """根据实际数据生成准确的失败原因描述。"""
-    no_odds = [
-        f"{ep['match'].home_team} vs {ep['match'].away_team}"
-        for ep in enriched_preds
-        if not ep["match"].sporttery_odds
-    ]
-    if no_odds:
-        return (
-            "无法生成投注方案：所选赛事缺少胜平负赔率，请先在今日分析页同步赛单"
-            f"（缺少赔率：{'、'.join(no_odds)}）"
-        )
-
     avoid_matches = [
         f"{ep['match'].home_team} vs {ep['match'].away_team}"
         for ep in enriched_preds
@@ -347,6 +337,17 @@ def _empty_plans_reason(enriched_preds: list[dict]) -> str:
         return (
             f"AI 分析建议回避所有所选场次（{'、'.join(avoid_matches)}），"
             "无法组成有效串关。建议重新选择赛事或在单场详情页重新触发分析。"
+        )
+
+    no_probs = [
+        f"{ep['match'].home_team} vs {ep['match'].away_team}"
+        for ep in enriched_preds
+        if not (ep.get("prediction") and (ep["prediction"].fused_probs or ep["prediction"].stat_probs))
+    ]
+    if no_probs:
+        return (
+            "无法生成投注方案：所选赛事尚无分析数据，请先在今日分析页触发 AI 分析"
+            f"（未分析：{'、'.join(no_probs)}）"
         )
 
     return "无法生成投注方案：所选赛事数据不完整，请重新同步赛单后再试"

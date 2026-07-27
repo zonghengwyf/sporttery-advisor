@@ -62,6 +62,7 @@ class ParlayLeg:
     model_votes_agree: int   # 同意此投注的模型数
     model_votes_total: int   # 参与投票的模型数
     model_names: list[str] = field(default_factory=list)
+    odds_estimated: bool = False  # 官方赔率未发布时用模型推算
 
     def to_dict(self) -> dict:
         return {
@@ -73,6 +74,7 @@ class ParlayLeg:
             "pick": self.pick,
             "pick_code": self.pick_code,
             "odds": self.odds,
+            "odds_estimated": self.odds_estimated,
             "win_prob": self.win_prob,
             "model_votes": {
                 "agree": self.model_votes_agree,
@@ -310,12 +312,16 @@ class TicketGenerator:
                 win_prob = _prob_for_pick(fp, primary_pick)
                 odds_val = _odds_for_pick(match.sporttery_odds, primary_pick)
 
+                # 官方赔率未发布时用模型概率推算隐含赔率（含 ~12.5% 水差）
+                odds_estimated = False
                 if odds_val is None or odds_val < 1.01:
-                    logger.warning(
-                        "match_id=%s _make_leg 返回 None：pick=%s odds_val=%s sporttery_odds=%s",
-                        mid, primary_pick, odds_val, match.sporttery_odds,
+                    raw_p = max(win_prob, 0.05)
+                    odds_val = round(min(1.0 / (raw_p * 1.125), 19.9), 2)
+                    odds_estimated = True
+                    logger.info(
+                        "match_id=%s 使用推算赔率：pick=%s prob=%.3f → odds=%.2f",
+                        mid, primary_pick, raw_p, odds_val,
                     )
-                    return None
 
                 # 计算 AI 共识
                 agree_count, total_count, model_names = _compute_votes(votes, primary_pick)
@@ -336,6 +342,7 @@ class TicketGenerator:
                     pick=primary_pick,
                     pick_code=_PICK_CODE.get(primary_pick, "-"),
                     odds=round(float(odds_val), 2),
+                    odds_estimated=odds_estimated,
                     win_prob=win_prob,
                     model_votes_agree=agree_count,
                     model_votes_total=total_count,

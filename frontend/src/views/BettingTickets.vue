@@ -15,6 +15,7 @@ interface Leg {
   league: string
   pick: string
   odds?: number
+  odds_estimated?: boolean
   confidence?: number
   rationale?: string
 }
@@ -65,6 +66,14 @@ const STEPS = [
 const activeScheme  = computed(() => schemes.value?.[activeTab.value] ?? null)
 const activeTabInfo = computed(() => TABS.find(t => t.key === activeTab.value) ?? TABS[0])
 const hasSchemes    = computed(() => schemes.value && TABS.some(t => schemes.value![t.key]?.legs?.length))
+const hasEstimatedOdds = computed(() => {
+  if (!schemes.value) return false
+  for (const t of TABS) {
+    const legs = schemes.value[t.key]?.legs ?? []
+    if (legs.some((l: Leg) => l.odds_estimated)) return true
+  }
+  return false
+})
 
 function pickColorClass(pick: string) {
   if (/主胜/.test(pick) || pick === '3') return 'tag-win'
@@ -366,6 +375,15 @@ onMounted(async () => {
     <!-- ── Scheme results ──────────────────────────────────────── -->
     <div v-if="hasSchemes && !generating" class="results-wrap">
 
+      <!-- Estimated odds notice -->
+      <div v-if="hasEstimatedOdds" class="est-odds-notice">
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+          <circle cx="8" cy="8" r="6.5"/>
+          <path d="M8 5v3.5M8 10.5h.01"/>
+        </svg>
+        部分赔率为模型预估（标注"预估"），官方赔率尚未开售，购彩前请在竞彩官网确认
+      </div>
+
       <!-- Results header -->
       <div class="results-head">
         <div class="results-head-left">
@@ -448,8 +466,11 @@ onMounted(async () => {
               <span class="leg-pick" :class="pickColorClass(leg.pick)">{{ pickLabel(leg.pick) }}</span>
             </div>
             <div class="leg-odds-col">
-              <span v-if="leg.odds" class="leg-odds font-num">{{ leg.odds.toFixed(2) }}</span>
-              <span v-else class="leg-odds text-muted">—</span>
+              <span v-if="leg.odds" class="leg-odds font-num" :class="{ 'leg-odds--est': leg.odds_estimated }">
+                {{ leg.odds.toFixed(2) }}
+              </span>
+              <span v-if="leg.odds_estimated" class="leg-odds-est-badge">预估</span>
+              <span v-else-if="!leg.odds" class="leg-odds text-muted">—</span>
             </div>
           </div>
         </div>
@@ -778,6 +799,21 @@ onMounted(async () => {
 /* ── Results ────────────────────────────────────────────────── */
 .results-wrap { padding: 12px 14px 32px; display: flex; flex-direction: column; gap: 10px; }
 
+.est-odds-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 10px 12px;
+  background: color-mix(in srgb, #f59e0b 8%, var(--card));
+  border: 1px solid color-mix(in srgb, #f59e0b 30%, transparent);
+  border-radius: 7px;
+  font-size: 11px;
+  color: #92400e;
+  line-height: 1.5;
+}
+:root.dark .est-odds-notice { color: #fcd34d; }
+.est-odds-notice svg { flex-shrink: 0; margin-top: 1px; color: #d97706; }
+
 .results-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .results-title { font-size: 14px; font-weight: 700; }
 .results-sub { font-size: 11px; color: var(--text3); margin-top: 2px; }
@@ -884,8 +920,10 @@ onMounted(async () => {
 .leg-pick-col { min-width: 36px; flex-shrink: 0; display: flex; justify-content: center; padding-top: 1px; }
 .leg-pick { font-size: 11px; font-weight: 700; padding: 3px 7px; border-radius: 4px; white-space: nowrap; }
 
-.leg-odds-col { min-width: 40px; flex-shrink: 0; text-align: right; }
+.leg-odds-col { min-width: 40px; flex-shrink: 0; text-align: right; display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
 .leg-odds { font-family: var(--font-disp); font-size: 17px; font-weight: 700; line-height: 1; letter-spacing: -.2px; color: var(--primary); }
+.leg-odds--est { color: var(--text2); }
+.leg-odds-est-badge { font-size: 9px; color: var(--text3); background: var(--bg); border: 1px solid var(--line); border-radius: 2px; padding: 1px 3px; line-height: 1; }
 
 .tag-win  { background: color-mix(in srgb, var(--primary) 14%, transparent); color: var(--primary); }
 .tag-draw { background: color-mix(in srgb, #f59e0b 14%, transparent); color: #d97706; }
