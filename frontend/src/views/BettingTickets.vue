@@ -668,11 +668,13 @@ onMounted(async () => {
   background: transparent;
   cursor: pointer;
   font-family: var(--font);
-  padding: 5px 8px;
+  padding: 10px 10px;
   border: var(--card-bd);
   border-radius: 6px;
   white-space: nowrap;
   flex-shrink: 0;
+  min-height: 36px;
+  touch-action: manipulation;
 }
 
 /* Tabs */
@@ -683,7 +685,8 @@ onMounted(async () => {
   flex-direction: column;
   align-items: center;
   gap: 2px;
-  padding: 8px 4px;
+  padding: 10px 4px;
+  min-height: 56px;
   font-family: var(--font);
   background: var(--card);
   border: var(--card-bd);
