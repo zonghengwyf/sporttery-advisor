@@ -43,7 +43,9 @@ const activeTab = ref<'conservative' | 'balanced' | 'high_odds' | 'scoreline'>('
 const error = ref<string | null>(null)
 const progressIndex = ref(0)
 const progressMsg = ref('')
+const elapsedSecs = ref(0)
 let _lastMatchIds: number[] = []
+let _elapsedTimer: ReturnType<typeof setInterval> | null = null
 
 const TABS = [
   { key: 'conservative' as const, label: '稳健', risk: '低风险' },
@@ -87,6 +89,8 @@ async function generate(matchIds: number[]) {
   schemes.value = null
   progressIndex.value = 0
   progressMsg.value = '准备中…'
+  elapsedSecs.value = 0
+  _elapsedTimer = setInterval(() => { elapsedSecs.value++ }, 1000)
 
   try {
     const token = localStorage.getItem('token') ?? ''
@@ -153,6 +157,7 @@ async function generate(matchIds: number[]) {
     }
   } finally {
     generating.value = false
+    if (_elapsedTimer) { clearInterval(_elapsedTimer); _elapsedTimer = null }
   }
 }
 
@@ -272,6 +277,7 @@ onMounted(async () => {
           <div class="gen-loading-title">正在生成方案…</div>
           <div class="gen-loading-sub">{{ progressMsg || '统计建模 · 情报融合 · 多模型投票' }}</div>
         </div>
+        <div class="gen-elapsed font-num">{{ elapsedSecs }}s</div>
       </div>
       <div class="gen-loading-steps">
         <div
@@ -559,7 +565,7 @@ onMounted(async () => {
   cursor: pointer;
   font-family: var(--font);
   border: var(--card-bd);
-  border-radius: 8px;
+  border-radius: 6px;
   transition: color .15s, border-color .15s;
   touch-action: manipulation;
   -webkit-tap-highlight-color: transparent;
@@ -615,6 +621,7 @@ onMounted(async () => {
 
 .gen-loading-title { font-size: 13px; font-weight: 700; }
 .gen-loading-sub { font-size: 11px; color: var(--text3); margin-top: 3px; line-height: 1.5; }
+.gen-elapsed { font-size: 11px; color: var(--text3); margin-left: auto; flex-shrink: 0; }
 
 .gen-loading-steps { display: flex; flex-direction: column; padding: 4px 0; }
 .step-item {
