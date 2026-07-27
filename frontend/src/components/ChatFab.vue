@@ -59,7 +59,14 @@ async function send() {
       signal: AbortSignal.timeout(120_000),
     })
     if (!res.ok) {
-      messages.value[idx].content = '请求失败，请检查 LLM 配置'
+      if (res.status === 401) {
+        messages.value[idx].content = '请先登录才能使用 AI 对话'
+        setTimeout(() => {
+          window.location.href = `/login?redirect=${encodeURIComponent(window.location.pathname)}`
+        }, 1500)
+      } else {
+        messages.value[idx].content = '请求失败，请检查 LLM 配置后重试'
+      }
       return
     }
 

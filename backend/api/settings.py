@@ -278,10 +278,12 @@ async def upsert_datasource_config(
     )
     config = result.scalar_one_or_none()
     if config:
-        config.api_key = data.api_key
+        if data.api_key is not None:  # None = "don't change existing key"
+            config.api_key = data.api_key
         config.use_scraper = data.use_scraper
         config.enabled = data.enabled
-        config.extra_config = data.extra_config
+        if data.extra_config is not None:
+            config.extra_config = data.extra_config
     else:
         config = DataSourceConfig(
             user_id=current_user.id,

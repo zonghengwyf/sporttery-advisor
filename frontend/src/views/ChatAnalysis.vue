@@ -61,6 +61,18 @@ async function send() {
       }),
     })
 
+    if (!res.ok) {
+      if (res.status === 401) {
+        assistantMsg.content = '请先登录才能使用 AI 对话'
+        setTimeout(() => {
+          window.location.href = `/login?redirect=${encodeURIComponent(window.location.pathname)}`
+        }, 1500)
+      } else {
+        assistantMsg.content = '请求失败，请检查 LLM 配置后重试'
+      }
+      return
+    }
+
     const reader = res.body!.getReader()
     const decoder = new TextDecoder()
     while (true) {
