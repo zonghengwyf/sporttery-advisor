@@ -1,5 +1,6 @@
 import logging
-from datetime import date
+import time
+from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, field_validator
@@ -12,6 +13,9 @@ from db.session import get_db
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+_last_sync_ts: float = 0.0
+_SYNC_COOLDOWN = 300  # 5 分钟内不重复同步
 
 
 class MatchOut(BaseModel):
@@ -40,32 +44,39 @@ class MatchOut(BaseModel):
 async def list_matches(
     sale_date: str = Query(default=str(date.today())),
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    result = await db.execute(
-        select(Match).where(Match.sale_date == sale_date).order_by(Match.kickoff_at)
-    )
-    matches = result.scalars().all()
-
-    # 仅今日无数据时才自动同步，其他日期不触发（防止被非认证请求滥用）
-    if not matches and sale_date == str(date.today()):
+    global _last_sync_ts
+    today_str = str(date.today())
+    tomorrow_str = str(date.today() + timedelta(days=1))
+    needs_sync = sale_date in ("all", today_str, tomorrow_str)
+    if needs_sync and time.monotonic() - _last_sync_ts > _SYNC_COOLDOWN:
         try:
             from core.data.sync import sync_daily_matches
-            n = await sync_daily_matches(db, date.today())
-            if n > 0:
-                result = await db.execute(
-                    select(Match).where(Match.sale_date == sale_date).order_by(Match.kickoff_at)
-                )
-                matches = result.scalars().all()
+            await sync_daily_matches(db, date.today())
+            if sale_date in ("all", tomorrow_str):
+                await sync_daily_matches(db, date.today() + timedelta(days=1))
+            _last_sync_ts = time.monotonic()
         except Exception as exc:
-            logger.warning("自动同步竞彩赛单失败：%s", exc)
+            logger.warning("实时同步竞彩赛单失败，返回缓存数据：%s", exc)
 
-    return matches
+    if sale_date == "all":
+        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=3)
+        result = await db.execute(
+            select(Match).where(Match.kickoff_at >= cutoff).order_by(Match.kickoff_at)
+        )
+    else:
+        result = await db.execute(
+            select(Match).where(Match.sale_date == sale_date).order_by(Match.kickoff_at)
+        )
+    return result.scalars().all()
 
 
 @router.get("/{match_id}", response_model=MatchOut)
 async def get_match(
     match_id: int,
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     result = await db.execute(select(Match).where(Match.id == match_id))
     match = result.scalar_one_or_none()

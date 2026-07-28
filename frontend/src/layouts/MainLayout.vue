@@ -10,7 +10,7 @@ const auth = useAuthStore()
 const nav = [
   { path: '/analysis', label: '赛事' },
   { path: '/backtest', label: '回测' },
-  { path: '/tickets',  label: '方案' },
+  { path: '/tickets',  label: '方案', featured: true },
   { path: '/records',  label: '战绩' },
   { path: '/settings', label: '设置' },
 ]
@@ -36,7 +36,7 @@ function isActive(path: string) {
           :key="item.path"
           type="button"
           class="mh-link"
-          :class="{ active: isActive(item.path) }"
+          :class="{ active: isActive(item.path), 'mh-link--featured': item.featured }"
           @click="router.push(item.path)"
         >{{ item.label }}</button>
       </nav>
@@ -64,7 +64,7 @@ function isActive(path: string) {
       :key="item.path"
       type="button"
       class="bn-item"
-      :class="{ active: isActive(item.path) }"
+      :class="{ active: isActive(item.path), 'bn-item--featured': item.featured }"
       @click="router.push(item.path)"
     >
       <svg v-if="item.path === '/analysis'" width="22" height="22" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">

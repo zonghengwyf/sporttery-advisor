@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import api from '@/api'
+import { useChatStore } from '@/stores/chat'
 
 const router = useRouter()
 const route = useRoute()
@@ -29,6 +30,7 @@ interface BatchPrediction {
   consensus: string | null
 }
 
+const chatStore = useChatStore()
 const matches = ref<Match[]>([])
 const predictions = ref<Record<number, BatchPrediction>>({})
 const loading = ref(true)
@@ -42,26 +44,37 @@ function localDate(offset = 0) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
-const selectedDate = ref(localDate())
-
-const dates = computed(() => {
-  return [-1, 0, 1].map(offset => {
-    const d = new Date()
-    d.setDate(d.getDate() + offset)
-    return { label: formatDateLabel(d, offset), value: localDate(offset) }
-  })
-})
-
-function formatDateLabel(d: Date, offset: number) {
+function formatGroupHeader(dateStr: string) {
+  const d = new Date(dateStr + 'T00:00:00')
+  const today = localDate()
+  const tomorrow = localDate(1)
   const days = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
-  const prefix = offset === 0 ? '今天' : offset === -1 ? '昨天' : offset === 1 ? '明天' : days[d.getDay()]
-  return `${prefix} ${d.getMonth() + 1}/${d.getDate()}`
+  if (dateStr === today) return `今天 · ${d.getMonth()+1}/${d.getDate()}`
+  if (dateStr === tomorrow) return `明天 · ${d.getMonth()+1}/${d.getDate()}`
+  return `${days[d.getDay()]} · ${d.getMonth()+1}/${d.getDate()}`
 }
+
+const groupedMatches = computed(() => {
+  const groups: Record<string, Match[]> = {}
+  for (const m of matches.value) {
+    if (!groups[m.sale_date]) groups[m.sale_date] = []
+    groups[m.sale_date].push(m)
+  }
+  return Object.entries(groups).sort(([a], [b]) => a.localeCompare(b))
+})
 
 const todayStats = computed(() => {
   const analyzed = Object.keys(predictions.value).length
   return { total: matches.value.length, analyzed }
 })
+
+// 选场时隐藏 FAB，避免遮住生成方案按钮
+watch(
+  [selectMode, selectedIds],
+  () => { chatStore.fabHidden = selectMode.value && selectedIds.value.length > 0 },
+  { deep: true }
+)
+onUnmounted(() => { chatStore.fabHidden = false })
 
 // ── 选场模式 ─────────────────────────────────────────────────────
 function toggleSelectMode() {
@@ -106,7 +119,7 @@ function goGenerate() {
 async function load() {
   loading.value = true
   try {
-    const { data } = await api.get('/matches/', { params: { sale_date: selectedDate.value } })
+    const { data } = await api.get('/matches/', { params: { sale_date: 'all' } })
     matches.value = data
     await loadPredictions()
   } catch {
@@ -130,7 +143,10 @@ async function loadPredictions() {
 async function syncMatches() {
   syncing.value = true
   try {
-    await api.post('/matches/sync')
+    await Promise.all([
+      api.post('/matches/sync', null, { params: { sale_date: localDate() } }),
+      api.post('/matches/sync', null, { params: { sale_date: localDate(1) } }),
+    ])
     await load()
   } finally {
     syncing.value = false
@@ -175,39 +191,38 @@ onMounted(() => {
 
 <template>
   <div class="view">
-    <!-- Date strip -->
-    <div class="date-strip">
-      <button
-        v-for="d in dates"
-        :key="d.value"
-        class="date-btn"
-        :class="{ on: d.value === selectedDate }"
-        @click="selectedDate = d.value; load()"
-      >{{ d.label }}</button>
-      <div class="strip-actions">
-        <button class="btn btn-ghost btn-sm" :disabled="syncing" @click="syncMatches" v-if="!selectMode">
+    <!-- Top bar: stats / actions -->
+    <div class="top-bar">
+      <div v-if="!selectMode" class="top-bar-left">
+        <button class="btn btn-ghost btn-sm" :disabled="syncing" @click="syncMatches">
           <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
             <path d="M14 8A6 6 0 0 1 2.5 12M2 8a6 6 0 0 1 11.5-4M2 4v4h4M14 12v-4h-4"/>
           </svg>
           <span v-if="syncing">同步中…</span>
           <span v-else>同步</span>
         </button>
-        <button
-          class="select-mode-btn"
-          :class="{ 'select-mode-btn--active': selectMode }"
-          @click="toggleSelectMode"
-          v-if="matches.length > 0"
-        >
-          <svg v-if="!selectMode" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
-            <rect x="2" y="2" width="5" height="5" rx="1"/>
-            <path d="M9 4h5M9 8h5M2 12h12"/>
+        <button class="btn btn-primary btn-sm" @click="router.push('/tickets')">
+          <svg width="12" height="12" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M10 2l1.8 5.2 5.2 1.8-5.2 1.8L10 16.5l-1.8-5.2-5.2-1.8 5.2-1.8Z"/>
           </svg>
-          <svg v-else width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
-            <path d="M3 8l3.5 3.5L13 5" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-          {{ selectMode ? '完成' : '选场' }}
+          出方案
         </button>
       </div>
+      <button
+        class="select-mode-btn"
+        :class="{ 'select-mode-btn--active': selectMode }"
+        @click="toggleSelectMode"
+        v-if="matches.length > 0"
+      >
+        <svg v-if="!selectMode" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+          <rect x="2" y="2" width="5" height="5" rx="1"/>
+          <path d="M9 4h5M9 8h5M2 12h12"/>
+        </svg>
+        <svg v-else width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M3 8l3.5 3.5L13 5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        {{ selectMode ? '完成' : '选场' }}
+      </button>
     </div>
 
     <!-- Inline stats / select mode bar -->
@@ -220,6 +235,8 @@ onMounted(() => {
           <button class="mode-link" @click="selectAll">全选</button>
           <span class="mode-dot">·</span>
           <button class="mode-link" @click="clearAll">全不选</button>
+          <span class="mode-dot">·</span>
+          <button class="mode-link mode-link--cancel" @click="toggleSelectMode">取消</button>
         </div>
       </div>
       <div v-else class="stats-bar">
@@ -249,88 +266,57 @@ onMounted(() => {
 
     <!-- Match list — B-style newspaper fixture rows -->
     <div v-else class="fixture-list" :class="{ 'fixture-list--select': selectMode }">
-      <div
-        v-for="m in matches"
-        :key="m.id"
-        class="fixture cursor-pointer"
-        :class="{
-          'fixture--selected': selectMode && isSelected(m.id),
-          'fixture--accent': !!predictions[m.id]
-        }"
-        @click="handleCardClick(m)"
-      >
-        <!-- Selection zone (absolute) -->
-        <Transition name="chk-fade">
-          <div v-if="selectMode" class="sel-zone" @click.stop="toggleSelect(m.id)">
-            <span class="sel-chk" :class="{ 'sel-chk--on': isSelected(m.id) }">
-              <svg v-if="isSelected(m.id)" width="10" height="10" viewBox="0 0 10 10" fill="none">
-                <path d="M2 5l2.5 2.5L8 3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-              </svg>
-            </span>
-          </div>
-        </Transition>
-
-        <!-- Left: info column -->
-        <div class="fx-left" :style="selectMode ? 'padding-left:44px' : ''">
-          <div class="fx-meta">
-            <span v-if="m.match_no" class="fx-no font-num">{{ m.match_no }}</span>
-            <span class="fx-lg">{{ m.league }}</span>
-            <span v-if="predictions[m.id]" class="badge" :class="confidenceBadge(predictions[m.id].confidence)">
-              {{ confidenceLabel(predictions[m.id].confidence) }}
-            </span>
-          </div>
-          <div class="fx-teams">
-            <div class="fx-team">
-              <span class="fx-dot fx-dot--h"></span>
-              <span class="fx-name">{{ m.home_team }}</span>
-              <span class="fx-tag">主</span>
+      <!-- 全部模式：按日期分组 -->
+      <template v-for="[dateStr, dayMatches] in groupedMatches" :key="dateStr">
+        <div class="date-group-hdr">{{ formatGroupHeader(dateStr) }}</div>
+        <div
+          v-for="m in dayMatches"
+          :key="m.id"
+          class="fixture cursor-pointer"
+          :class="{
+            'fixture--selected': selectMode && isSelected(m.id),
+            'fixture--accent': !!predictions[m.id]
+          }"
+          @click="handleCardClick(m)"
+        >
+          <Transition name="chk-fade">
+            <div v-if="selectMode" class="sel-zone" @click.stop="toggleSelect(m.id)">
+              <span class="sel-chk" :class="{ 'sel-chk--on': isSelected(m.id) }">
+                <svg v-if="isSelected(m.id)" width="10" height="10" viewBox="0 0 10 10" fill="none">
+                  <path d="M2 5l2.5 2.5L8 3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </span>
             </div>
-            <div class="fx-team">
-              <span class="fx-dot fx-dot--a"></span>
-              <span class="fx-name">{{ m.away_team }}</span>
-              <span class="fx-tag">客</span>
+          </Transition>
+          <div class="fx-left" :style="selectMode ? 'padding-left:44px' : ''">
+            <div class="fx-meta">
+              <span v-if="m.match_no" class="fx-no font-num">{{ m.match_no }}</span>
+              <span class="fx-lg">{{ m.league }}</span>
+              <span v-if="predictions[m.id]" class="badge" :class="confidenceBadge(predictions[m.id].confidence)">{{ confidenceLabel(predictions[m.id].confidence) }}</span>
+            </div>
+            <div class="fx-teams">
+              <div class="fx-team"><span class="fx-dot fx-dot--h"></span><span class="fx-name">{{ m.home_team }}</span><span class="fx-tag">主</span></div>
+              <div class="fx-team"><span class="fx-dot fx-dot--a"></span><span class="fx-name">{{ m.away_team }}</span><span class="fx-tag">客</span></div>
+            </div>
+            <div v-if="predictions[m.id]?.consensus" class="fx-ai-line">
+              <span class="fx-ai-dot"></span>
+              <span class="fx-ai-text">{{ predictions[m.id].consensus }}</span>
+            </div>
+            <div class="fx-footer">
+              <span class="fx-time font-num">{{ formatTime(m.kickoff_at) }}</span>
             </div>
           </div>
-          <div class="fx-footer">
-            <span class="fx-time font-num">{{ formatTime(m.kickoff_at) }}</span>
-            <span v-if="predictions[m.id]?.consensus" class="fx-consensus">
-              AI · {{ predictions[m.id].consensus }}
-            </span>
+          <div class="fx-odds-wrap">
+            <template v-if="homeOdds(m)">
+              <div v-if="m.sporttery_odds?.hhad" class="fx-hhad-pill font-num">让{{ handicapStr(m) }}</div>
+              <div class="fx-or"><span class="fx-dsq fx-dsq--w"></span><span class="fx-onum fx-onum--w font-num">{{ homeOdds(m)!.toFixed(2) }}</span><template v-if="m.sporttery_odds?.hhad"><span class="fx-vsep"></span><span class="fx-onum fx-onum--w font-num">{{ m.sporttery_odds.hhad.home.toFixed(2) }}</span></template></div>
+              <div class="fx-or"><span class="fx-dsq fx-dsq--d"></span><span class="fx-onum fx-onum--d font-num">{{ drawOdds(m)!.toFixed(2) }}</span><template v-if="m.sporttery_odds?.hhad"><span class="fx-vsep"></span><span class="fx-onum fx-onum--d font-num">{{ m.sporttery_odds.hhad.draw.toFixed(2) }}</span></template></div>
+              <div class="fx-or"><span class="fx-dsq fx-dsq--l"></span><span class="fx-onum fx-onum--l font-num">{{ awayOdds(m)!.toFixed(2) }}</span><template v-if="m.sporttery_odds?.hhad"><span class="fx-vsep"></span><span class="fx-onum fx-onum--l font-num">{{ m.sporttery_odds.hhad.away.toFixed(2) }}</span></template></div>
+            </template>
+            <span v-else class="fx-na-text">赔率<br>待更新</span>
           </div>
         </div>
-
-        <!-- Odds: HAD + HHAD merged into unified rows -->
-        <div class="fx-odds-wrap">
-          <template v-if="homeOdds(m)">
-            <div v-if="m.sporttery_odds?.hhad" class="fx-hhad-pill font-num">让{{ handicapStr(m) }}</div>
-            <div class="fx-or">
-              <span class="fx-dsq fx-dsq--w"></span>
-              <span class="fx-onum fx-onum--w font-num">{{ homeOdds(m)!.toFixed(2) }}</span>
-              <template v-if="m.sporttery_odds?.hhad">
-                <span class="fx-vsep"></span>
-                <span class="fx-onum fx-onum--w font-num">{{ m.sporttery_odds.hhad.home.toFixed(2) }}</span>
-              </template>
-            </div>
-            <div class="fx-or">
-              <span class="fx-dsq fx-dsq--d"></span>
-              <span class="fx-onum fx-onum--d font-num">{{ drawOdds(m)!.toFixed(2) }}</span>
-              <template v-if="m.sporttery_odds?.hhad">
-                <span class="fx-vsep"></span>
-                <span class="fx-onum fx-onum--d font-num">{{ m.sporttery_odds.hhad.draw.toFixed(2) }}</span>
-              </template>
-            </div>
-            <div class="fx-or">
-              <span class="fx-dsq fx-dsq--l"></span>
-              <span class="fx-onum fx-onum--l font-num">{{ awayOdds(m)!.toFixed(2) }}</span>
-              <template v-if="m.sporttery_odds?.hhad">
-                <span class="fx-vsep"></span>
-                <span class="fx-onum fx-onum--l font-num">{{ m.sporttery_odds.hhad.away.toFixed(2) }}</span>
-              </template>
-            </div>
-          </template>
-          <span v-else class="fx-na-text">赔率<br>待更新</span>
-        </div>
-      </div>
+      </template>
     </div>
 
     <!-- Floating generate bar -->
@@ -354,31 +340,17 @@ onMounted(() => {
 <style scoped>
 .view { display: flex; flex-direction: column; min-height: 100%; }
 
-/* ── Date strip ────────────────────────────────────────────── */
-.date-strip {
+/* ── Top bar ───────────────────────────────────────────────── */
+.top-bar {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 10px 16px;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 14px;
   border-bottom: var(--card-bd);
-  overflow-x: auto;
   flex-shrink: 0;
 }
-.date-btn {
-  padding: 4px 12px;
-  border-radius: 20px;
-  border: var(--card-bd);
-  font-size: 12px;
-  cursor: pointer;
-  white-space: nowrap;
-  background: transparent;
-  color: var(--text2);
-  transition: all .15s;
-  font-family: var(--font);
-}
-.date-btn.on { background: var(--primary); color: #fff; border-color: var(--primary); }
-
-.strip-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; flex-shrink: 0; }
+.top-bar-left { display: flex; align-items: center; gap: 6px; }
 
 .select-mode-btn {
   display: flex;
@@ -429,6 +401,24 @@ onMounted(() => {
   font-family: var(--font);
 }
 .mode-dot { font-size: 10px; color: var(--line); }
+.mode-link--cancel { color: var(--text3); }
+.mode-link--cancel:hover { color: var(--text); }
+
+/* ── Date group header ──────────────────────────────────────── */
+.date-group-hdr {
+  padding: 5px 14px;
+  font-size: 10px;
+  font-family: var(--font-disp);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: var(--text3);
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
 
 /* ── Fixture list (B-style newspaper rows) ─────────────────── */
 .fixture-list {
@@ -557,16 +547,27 @@ onMounted(() => {
   color: var(--text3);
   letter-spacing: .3px;
 }
-.fx-consensus {
-  font-size: 10px;
-  color: var(--text2);
-  background: var(--primary-d);
-  border-left: 2px solid var(--primary);
-  padding: 1px 6px;
-  border-radius: 0 3px 3px 0;
-  white-space: nowrap;
+.fx-ai-line {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 5px;
+}
+.fx-ai-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--primary);
+  flex-shrink: 0;
+}
+.fx-ai-text {
+  font-size: 12px;
+  color: var(--primary);
+  font-weight: 500;
+  line-height: 1.3;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
   max-width: 160px;
 }
 

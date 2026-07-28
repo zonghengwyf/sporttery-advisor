@@ -172,6 +172,8 @@ async def stream_tickets(
                         existing[mid] = pred
 
                 missing_ids = [mid for mid in match_ids if mid not in existing]
+                n_existing = len(existing)
+                n_missing = len(missing_ids)
 
                 # 1 — 自动分析缺失场次
                 if missing_ids:
@@ -191,17 +193,25 @@ async def stream_tickets(
                     from core.pipeline import DailyPipeline
                     pipeline = DailyPipeline()
 
+                    yield _sse(
+                        "step",
+                        step="ai",
+                        msg=f"AI 情报分析：已有 {n_existing} 场，新分析 {n_missing} 场…",
+                        index=1,
+                        total=4,
+                    )
+
                     for i, mid in enumerate(missing_ids):
-                        yield _sse(
-                            "step",
-                            step="ai",
-                            msg=f"AI 情报分析 ({i + 1}/{len(missing_ids)})…",
-                            index=1,
-                            total=4,
-                        )
                         match = await db.get(Match, mid)
                         if not match:
                             continue
+                        yield _sse(
+                            "step",
+                            step="ai",
+                            msg=f"AI 分析 {match.home_team} vs {match.away_team} ({i+1}/{n_missing})…",
+                            index=1,
+                            total=4,
+                        )
                         try:
                             ar = await pipeline.analyze_single_match(db, match, llm_client)
                             pred = Prediction(
@@ -218,7 +228,8 @@ async def stream_tickets(
                                 llm_model=ar.llm_model,
                             )
                             db.add(pred)
-                            await db.flush()
+                            await db.commit()
+                            await db.refresh(pred)
                             existing[mid] = pred
                             logger.info("SSE 自动分析完成 match_id=%d", mid)
                         except Exception as exc:
@@ -227,26 +238,44 @@ async def stream_tickets(
                                 await db.rollback()
                             except Exception:
                                 pass
-
-                    await db.commit()
+                else:
+                    yield _sse(
+                        "step",
+                        step="ai",
+                        msg=f"全部 {n_existing} 场已有分析数据，跳过 AI…",
+                        index=1,
+                        total=4,
+                    )
 
                 # 2 — 构建 enriched_predictions
-                yield _sse("step", step="model", msg="构建概率模型输入…", index=2, total=4)
-
                 predictions = list(existing.values())
                 if not predictions:
                     yield _sse("error", msg="所选赛事均无法完成分析，请检查 LLM 配置或稍后重试")
                     return
 
+                avg_conf = 0.0
+                n_with_conf = 0
                 enriched_preds: list[dict] = []
                 for pred in predictions:
                     m = await db.get(Match, pred.match_id)
                     if m:
                         enriched_preds.append({"match": m, "prediction": pred, "ensemble_votes": []})
+                        if pred.confidence:
+                            avg_conf += pred.confidence
+                            n_with_conf += 1
 
                 if not enriched_preds:
                     yield _sse("error", msg="无法获取赛事数据")
                     return
+
+                avg_conf_pct = round(avg_conf / max(n_with_conf, 1) * 100)
+                yield _sse(
+                    "step",
+                    step="model",
+                    msg=f"融合 {len(enriched_preds)} 场概率，平均置信度 {avg_conf_pct}%…",
+                    index=2,
+                    total=4,
+                )
 
                 # 3 — 生成串关方案
                 yield _sse("step", step="ticket", msg="筛选票型 & 分配资金…", index=3, total=4)
@@ -259,8 +288,13 @@ async def stream_tickets(
                     yield _sse("error", msg=_empty_plans_reason(enriched_preds))
                     return
 
+                _PLAN_LABELS = {
+                    "conservative": "稳健", "balanced": "均衡",
+                    "high_odds": "博高赔", "scoreline": "比分",
+                }
+                plan_summary = "·".join(_PLAN_LABELS.get(p.plan_id, p.plan_id) for p in plans)
                 schemes = _build_schemes(plans, enriched_preds)
-                yield _sse("done", schemes=schemes)
+                yield _sse("done", schemes=schemes, summary=f"生成 {len(plans)} 套方案：{plan_summary}")
 
             except Exception as exc:
                 logger.error("stream_tickets 未处理异常: %s", exc, exc_info=True)
@@ -285,7 +319,7 @@ def _build_schemes(plans, enriched_preds) -> dict:
         for leg in plan.legs:
             legs_out.append({
                 "match_id":      leg.match_id,
-                "match_no":      leg.match_code,
+                "match_code":    leg.match_code,
                 "home_team":     leg.home_team,
                 "away_team":     leg.away_team,
                 "kickoff":       leg.kickoff,

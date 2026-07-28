@@ -621,3 +621,37 @@ select.input { appearance: none; cursor: pointer; }
 /* ─── Transition ─── */
 .fade-enter-active, .fade-leave-active { transition: opacity .15s; }
 .fade-enter-from, .fade-leave-to { opacity: 0; }
+
+/* ─── Featured nav — 方案 凸显 ─── */
+/* Desktop: ghost-button style even when inactive */
+.mh-link--featured:not(.active) {
+  color: rgba(255,255,255,.95);
+  background: rgba(255,255,255,.18);
+  border: 1px solid rgba(255,255,255,.3);
+  padding: 4px 13px;  /* compensate for border */
+}
+/* Mobile: "方案" 方块凸起按钮 */
+@media (max-width: 767px) {
+  .bn-item--featured {
+    position: relative;
+    overflow: visible;
+    color: var(--primary);
+  }
+  .bn-item--featured::before { display: none; }
+  .bn-item--featured svg {
+    background: var(--primary);
+    color: #fff;
+    padding: 10px;
+    border-radius: 14px;
+    box-sizing: content-box;
+    box-shadow: 0 4px 12px rgba(0,0,0,.22);
+    margin-top: -8px;
+    transition: transform .12s, box-shadow .12s;
+  }
+  .bn-item--featured.active svg {
+    box-shadow: 0 4px 16px color-mix(in srgb, var(--primary) 40%, transparent);
+  }
+  .bn-item--featured:active svg { transform: scale(0.93); }
+  .bn-item--featured span { font-weight: 700; }
+  .bn-item--featured:not(.active) svg { opacity: 0.88; }
+}

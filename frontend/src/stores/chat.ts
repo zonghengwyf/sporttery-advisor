@@ -4,6 +4,7 @@ import { ref } from 'vue'
 export const useChatStore = defineStore('chat', () => {
   const open = ref(false)
   const requestMatchId = ref<number | null>(null)
+  const fabHidden = ref(false)
 
   function openWith(matchId?: number | null) {
     requestMatchId.value = matchId ?? null
@@ -14,5 +15,5 @@ export const useChatStore = defineStore('chat', () => {
     open.value = false
   }
 
-  return { open, requestMatchId, openWith, close }
+  return { open, requestMatchId, openWith, close, fabHidden }
 })

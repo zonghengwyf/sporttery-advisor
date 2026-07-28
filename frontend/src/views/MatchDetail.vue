@@ -70,6 +70,21 @@ function drawOdds() { return match.value?.sporttery_odds?.draw ?? null }
 function awayOdds() { return match.value?.sporttery_odds?.away ?? null }
 function aiSummary() { return prediction.value?.intel_summary ?? null }
 
+const hhad = computed(() => match.value?.sporttery_odds?.hhad ?? null)
+const handicapLabel = computed(() => {
+  const h = hhad.value?.handicap
+  if (h == null) return '让球'
+  if (h > 0) return `主让${h}球`
+  if (h < 0) return `客让${Math.abs(h)}球`
+  return '让平球'
+})
+
+function impliedProbs(h: number, d: number, a: number) {
+  const raw = [1/h, 1/d, 1/a]
+  const total = raw.reduce((s, v) => s + v, 0)
+  return raw.map(v => Math.round(v / total * 100) + '%')
+}
+
 const ensembleVotes = computed<any[]>(() => {
   return prediction.value?.tickets?.ensemble_votes ?? []
 })
@@ -138,34 +153,67 @@ onMounted(load)
         </div>
       </div>
 
-      <!-- Odds + probs -->
+      <!-- Odds card: HAD + optional HHAD -->
       <div class="section px-4 pb-4" v-if="homeOdds()">
-        <div class="section-label">赔率 & 概率</div>
+        <div class="section-label">赔率 & AI 概率</div>
         <div class="card no-accent">
+
+          <!-- HAD row header -->
+          <div class="odds-market-hdr">
+            <span class="odds-market-tag">全场胜平负</span>
+            <span v-if="prediction?.fused_probs" class="odds-market-hint">AI 概率</span>
+          </div>
+
           <div class="odds-table">
             <div class="odds-col">
               <div class="odds-head font-disp">主胜</div>
               <div class="odds-num win">{{ homeOdds()?.toFixed(2) }}</div>
-              <div class="odds-prob mt-2">{{ homePct() }}</div>
+              <div v-if="prediction?.fused_probs" class="odds-prob mt-2">{{ homePct() }}</div>
             </div>
             <div class="odds-divider" />
             <div class="odds-col">
               <div class="odds-head font-disp">平局</div>
               <div class="odds-num draw">{{ drawOdds()?.toFixed(2) }}</div>
-              <div class="odds-prob mt-2">{{ drawPct() }}</div>
+              <div v-if="prediction?.fused_probs" class="odds-prob mt-2">{{ drawPct() }}</div>
             </div>
             <div class="odds-divider" />
             <div class="odds-col">
               <div class="odds-head font-disp">客胜</div>
               <div class="odds-num lose">{{ awayOdds()?.toFixed(2) }}</div>
-              <div class="odds-prob mt-2">{{ awayPct() }}</div>
+              <div v-if="prediction?.fused_probs" class="odds-prob mt-2">{{ awayPct() }}</div>
             </div>
           </div>
+
           <div v-if="prediction?.fused_probs" class="triple-bar">
             <div class="triple-seg triple-win"  :style="{ flex: prediction.fused_probs.home }"></div>
             <div class="triple-seg triple-draw" :style="{ flex: prediction.fused_probs.draw }"></div>
             <div class="triple-seg triple-away" :style="{ flex: prediction.fused_probs.away }"></div>
           </div>
+
+          <!-- HHAD sub-section -->
+          <template v-if="hhad">
+            <div class="odds-market-hdr odds-market-hdr--sub">
+              <span class="odds-market-tag odds-market-tag--hhad">{{ handicapLabel }}</span>
+              <span class="odds-market-hint">隐含概率</span>
+            </div>
+            <div class="odds-table odds-table--compact">
+              <div class="odds-col">
+                <div class="odds-num-sm win">{{ hhad.home?.toFixed(2) }}</div>
+                <div v-if="hhad.home && hhad.draw && hhad.away" class="odds-prob">{{ impliedProbs(hhad.home, hhad.draw, hhad.away)[0] }}</div>
+              </div>
+              <div class="odds-divider" />
+              <div class="odds-col">
+                <div class="odds-num-sm draw">{{ hhad.draw?.toFixed(2) }}</div>
+                <div v-if="hhad.home && hhad.draw && hhad.away" class="odds-prob">{{ impliedProbs(hhad.home, hhad.draw, hhad.away)[1] }}</div>
+              </div>
+              <div class="odds-divider" />
+              <div class="odds-col">
+                <div class="odds-num-sm lose">{{ hhad.away?.toFixed(2) }}</div>
+                <div v-if="hhad.home && hhad.draw && hhad.away" class="odds-prob">{{ impliedProbs(hhad.home, hhad.draw, hhad.away)[2] }}</div>
+              </div>
+            </div>
+          </template>
+
         </div>
       </div>
 
@@ -314,7 +362,7 @@ onMounted(load)
 
 .section { margin-top: 16px; }
 
-.odds-table { display: flex; padding: 16px; }
+.odds-table { display: flex; padding: 12px 16px 14px; }
 .odds-col { flex: 1; display: flex; flex-direction: column; align-items: center; text-align: center; }
 .odds-head { font-size: 10px; font-weight: 600; letter-spacing: .6px; color: var(--text3); margin-bottom: 6px; }
 .odds-num { font-family: var(--font-disp); font-size: 44px; font-weight: 700; line-height: 1; }
@@ -324,7 +372,47 @@ onMounted(load)
 .odds-prob { font-size: 12px; color: var(--text2); font-weight: 500; }
 .odds-divider { width: 1px; background: var(--line); margin: 0 8px; }
 
-.triple-bar { display: flex; height: 8px; margin: 4px 16px 16px; border-radius: 4px; overflow: hidden; gap: 2px; }
+.triple-bar { display: flex; height: 8px; margin: 4px 16px 12px; border-radius: 4px; overflow: hidden; gap: 2px; }
+
+/* Odds market sub-headers */
+.odds-market-hdr {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px 0;
+}
+.odds-market-hdr--sub {
+  padding-top: 10px;
+  border-top: var(--card-bd);
+}
+.odds-market-tag {
+  font-size: 10px;
+  font-family: var(--font-disp);
+  font-weight: 700;
+  letter-spacing: .4px;
+  color: var(--text3);
+  text-transform: uppercase;
+}
+.odds-market-tag--hhad {
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+  padding: 2px 7px;
+  border-radius: 3px;
+}
+.odds-market-hint {
+  font-size: 10px;
+  color: var(--text3);
+}
+.odds-table--compact { padding: 8px 16px 14px; }
+.odds-num-sm {
+  font-family: var(--font-disp);
+  font-size: 28px;
+  font-weight: 700;
+  line-height: 1;
+}
+.odds-num-sm.win  { color: var(--win-c); }
+.odds-num-sm.draw { color: var(--draw-c); }
+.odds-num-sm.lose { color: var(--text2); }
 .triple-seg { transition: flex-grow .5s ease; }
 .triple-win  { background: var(--win-c); }
 .triple-draw { background: var(--draw-c); }

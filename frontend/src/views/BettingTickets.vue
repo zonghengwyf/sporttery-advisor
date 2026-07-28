@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import api, { betsApi } from '@/api'
 import { useBettingStore } from '@/stores/betting'
@@ -12,13 +12,17 @@ const bettingStore = useBettingStore()
 interface Leg {
   match_id?: number
   match_no?: string | null
+  match_code?: string           // 竞彩场次编号（如 "026001"）
   home_team: string
   away_team: string
   league: string
+  kickoff?: string              // "20:00"
   pick: string
+  pick_code?: string            // 投注代码 "3"/"1"/"0"
   odds?: number
   odds_estimated?: boolean
   confidence?: number
+  model_votes?: { agree: number; total: number; models?: string[] }
   rationale?: string
 }
 interface Scheme {
@@ -50,6 +54,8 @@ const elapsedSecs = ref(0)
 const lastMatchIds = ref<number[]>([])
 const completedSteps = ref(0)   // steps completed in last run (0 = not run yet)
 const stepLogExpanded = ref(false)
+const stepLog = ref<string[]>([])      // per-step detail messages from SSE
+const localMultiplier = ref(1)        // 倍数 (× 2元/注), integer ≥ 1
 let _elapsedTimer: ReturnType<typeof setInterval> | null = null
 
 const TABS = [
@@ -79,6 +85,16 @@ const hasEstimatedOdds = computed(() => {
   return false
 })
 
+// Sync localMultiplier when active scheme changes
+watch(activeScheme, (scheme) => {
+  if (scheme?.stake != null) localMultiplier.value = Math.max(1, Math.round(scheme.stake / 2))
+}, { immediate: true })
+
+const localStake = computed(() => Math.max(1, Math.round(localMultiplier.value)) * 2)
+const dynamicPrize = computed(() =>
+  Math.round(localStake.value * (activeScheme.value?.total_odds ?? 1))
+)
+
 function pickColorClass(pick: string) {
   if (/主胜/.test(pick) || pick === '3') return 'tag-win'
   if (/^平/.test(pick)  || pick === '1') return 'tag-draw'
@@ -105,6 +121,7 @@ async function generate(matchIds: number[]) {
   elapsedSecs.value = 0
   completedSteps.value = 0
   stepLogExpanded.value = false
+  stepLog.value = new Array(STEPS.length).fill('')
   _elapsedTimer = setInterval(() => { elapsedSecs.value++ }, 1000)
 
   try {
@@ -146,17 +163,21 @@ async function generate(matchIds: number[]) {
         try {
           const ev = JSON.parse(line.slice(6))
           if (ev.event === 'step') {
-            progressIndex.value = ev.index ?? 0
+            const idx = ev.index ?? 0
+            progressIndex.value = idx
             progressMsg.value = ev.msg ?? ''
+            if (ev.msg) stepLog.value[idx] = ev.msg
           } else if (ev.event === 'done') {
             schemes.value = ev.schemes
             for (const t of TABS) {
               if (ev.schemes?.[t.key]?.legs?.length) { activeTab.value = t.key; break }
             }
             completedSteps.value = STEPS.length
+            if (ev.summary) stepLog.value[STEPS.length - 1] = ev.summary
             bettingStore.save(ev.schemes, activeTab.value, lastMatchIds.value)
           } else if (ev.event === 'error') {
             completedSteps.value = progressIndex.value
+            if (ev.msg) stepLog.value[progressIndex.value] = `失败: ${ev.msg}`
             error.value = ev.msg ?? '未知错误'
           }
         } catch { /* skip malformed */ }
@@ -181,9 +202,7 @@ async function generate(matchIds: number[]) {
 
 async function generateAll() {
   try {
-    const d = new Date()
-    const today = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
-    const { data } = await api.get('/matches/', { params: { sale_date: today } })
+    const { data } = await api.get('/matches/', { params: { sale_date: 'all' } })
     const ids = (data as { id: number }[]).map(m => m.id)
     await generate(ids)
   } catch {
@@ -271,9 +290,7 @@ async function confirmBet() {
 
 onMounted(async () => {
   try {
-    const d = new Date()
-    const today = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
-    const { data } = await api.get('/matches/', { params: { sale_date: today } })
+    const { data } = await api.get('/matches/', { params: { sale_date: 'all' } })
     totalMatchCount.value = (data as unknown[]).length
   } catch { /* silent */ }
 
@@ -282,11 +299,10 @@ onMounted(async () => {
     const ids = idsQuery.split(',').map(Number).filter(Boolean)
     if (ids.length) await generate(ids)
   } else if (bettingStore.schemes) {
-    // restore last session
     schemes.value = bettingStore.schemes
     activeTab.value = bettingStore.activeTab
     lastMatchIds.value = bettingStore.lastMatchIds
-    completedSteps.value = STEPS.length
+    // 不恢复 completedSteps — 日志为空时不显示日志按钮
   }
 })
 </script>
@@ -310,10 +326,10 @@ onMounted(async () => {
         </div>
       </div>
 
-      <div class="empty-title">今日投注方案</div>
+      <div class="empty-title">AI 投注方案</div>
       <div class="empty-sub">
-        <strong>{{ totalMatchCount > 0 ? `${totalMatchCount} 场赛事` : '今日赛事' }}</strong>
-        已就绪 · AI 三模型筛选
+        <strong>{{ totalMatchCount > 0 ? `${totalMatchCount} 场赛事` : '全部赛事' }}</strong>
+        可选 · AI 三模型筛选
       </div>
 
       <!-- Scheme type preview pills -->
@@ -328,7 +344,7 @@ onMounted(async () => {
         <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
           <path d="M10 2l1.8 5.2 5.2 1.8-5.2 1.8L10 16.5l-1.8-5.2-5.2-1.8 5.2-1.8Z"/>
         </svg>
-        一键生成今日方案
+        一键生成方案
       </button>
 
       <button class="custom-select-btn" @click="goCustomSelect">
@@ -405,41 +421,44 @@ onMounted(async () => {
       <div class="results-head">
         <div class="results-head-left">
           <div class="results-title">AI 投注方案</div>
-          <div class="results-sub">点击场次号可在官网核对赔率</div>
+          <div class="results-sub">调整注额可实时重算彩金</div>
         </div>
-        <button class="reselect-btn" @click="resetSchemes">
-          <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
-            <path d="M14 8A6 6 0 0 1 2.5 12M2 8a6 6 0 0 1 11.5-4M2 4v4h4M14 12v-4h-4"/>
-          </svg>
-          重新生成
-        </button>
+        <div class="results-head-right">
+          <button
+            v-if="completedSteps > 0"
+            class="log-icon-btn"
+            :class="{ active: stepLogExpanded }"
+            :title="`生成日志 ${completedSteps}/${STEPS.length} 步`"
+            @click="stepLogExpanded = !stepLogExpanded"
+          >
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M2 4h12M2 8h8M2 12h5"/>
+            </svg>
+            <span>日志</span>
+          </button>
+          <button class="reselect-btn" @click="resetSchemes">
+            <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M14 8A6 6 0 0 1 2.5 12M2 8a6 6 0 0 1 11.5-4M2 4v4h4M14 12v-4h-4"/>
+            </svg>
+            重新生成
+          </button>
+        </div>
       </div>
 
-      <!-- Step log (collapsible) -->
-      <div v-if="completedSteps > 0" class="step-log-wrap">
-        <button class="step-log-toggle" @click="stepLogExpanded = !stepLogExpanded">
-          <svg class="step-log-icon step-icon--done" width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2">
+      <!-- Step log dropdown -->
+      <div v-if="completedSteps > 0 && stepLogExpanded" class="step-log-dropdown">
+        <div
+          v-for="(s, i) in STEPS"
+          :key="s.key"
+          class="step-log-item"
+          :class="i < completedSteps ? 'step-log-done' : 'step-log-skip'"
+        >
+          <svg v-if="i < completedSteps" class="step-icon--done" width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2">
             <polyline points="2,6 5,9 10,3"/>
           </svg>
-          <span>生成完成</span>
-          <span class="step-log-detail">{{ completedSteps }}/{{ STEPS.length }} 步</span>
-          <svg class="step-log-chevron" :class="{ 'rotate-180': stepLogExpanded }" width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
-            <path d="M4 6l4 4 4-4"/>
-          </svg>
-        </button>
-        <div v-if="stepLogExpanded" class="step-log-list">
-          <div
-            v-for="(s, i) in STEPS"
-            :key="s.key"
-            class="step-log-item"
-            :class="i < completedSteps ? 'step-log-done' : 'step-log-skip'"
-          >
-            <svg v-if="i < completedSteps" class="step-icon--done" width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2">
-              <polyline points="2,6 5,9 10,3"/>
-            </svg>
-            <span v-else class="step-dot" />
-            {{ s.label }}
-          </div>
+          <span v-else class="step-dot" />
+          <span class="step-log-name">{{ s.label }}</span>
+          <span v-if="stepLog[i]" class="step-log-detail-text">{{ stepLog[i] }}</span>
         </div>
       </div>
 
@@ -477,7 +496,7 @@ onMounted(async () => {
 
         <!-- Legend -->
         <div class="leg-legend">
-          <span class="legend-no">场次</span>
+          <span class="legend-no">编号</span>
           <span class="legend-match">对阵</span>
           <span class="legend-pick">投注</span>
           <span class="legend-odds">赔率</span>
@@ -487,8 +506,8 @@ onMounted(async () => {
         <div class="scheme-legs">
           <div v-for="(leg, i) in activeScheme.legs" :key="i" class="scheme-leg">
             <div class="leg-no-col">
-              <div v-if="leg.match_no" class="leg-match-no font-num">{{ leg.match_no }}</div>
-              <div v-else class="leg-seq font-num">{{ String(i+1).padStart(2,'0') }}</div>
+              <div class="leg-match-no font-num">{{ leg.match_code ? leg.match_code.slice(-3) : String(i+1).padStart(2,'0') }}</div>
+              <div v-if="leg.kickoff" class="leg-kickoff font-num">{{ leg.kickoff }}</div>
             </div>
             <div class="leg-info">
               <div class="leg-teams">
@@ -503,12 +522,16 @@ onMounted(async () => {
               </div>
               <div class="leg-meta">
                 <span class="leg-league">{{ leg.league }}</span>
-                <span v-if="leg.confidence" class="leg-conf font-num">{{ leg.confidence }}%</span>
+                <span v-if="leg.model_votes?.total" class="leg-votes font-num">
+                  {{ leg.model_votes.agree }}/{{ leg.model_votes.total }}共识
+                </span>
+                <span v-else-if="leg.confidence" class="leg-conf font-num">{{ leg.confidence }}%</span>
               </div>
               <div v-if="leg.rationale" class="leg-rationale">{{ leg.rationale }}</div>
             </div>
             <div class="leg-pick-col">
               <span class="leg-pick" :class="pickColorClass(leg.pick)">{{ pickLabel(leg.pick) }}</span>
+              <span v-if="leg.pick_code" class="leg-pick-code font-num">{{ leg.pick_code }}</span>
             </div>
             <div class="leg-odds-col">
               <span v-if="leg.odds" class="leg-odds font-num" :class="{ 'leg-odds--est': leg.odds_estimated }">
@@ -526,8 +549,19 @@ onMounted(async () => {
         <!-- Stats -->
         <div class="scheme-stats">
           <div class="stat-cell">
-            <div class="stat-label">建议投注</div>
-            <div class="stat-val font-num">¥{{ activeScheme.stake ?? 20 }}</div>
+            <div class="stat-label">倍数</div>
+            <div class="stat-stake-wrap">
+              <input
+                v-model.number="localMultiplier"
+                type="number"
+                min="1"
+                max="500"
+                step="1"
+                class="stat-stake-input font-num"
+              />
+              <span class="stat-currency font-num">倍</span>
+            </div>
+            <div class="stat-stake-hint font-num">= ¥{{ localStake }}</div>
           </div>
           <div class="stat-sep" />
           <div class="stat-cell">
@@ -536,12 +570,8 @@ onMounted(async () => {
           </div>
           <div class="stat-sep" />
           <div class="stat-cell">
-            <div class="stat-label">最高预期</div>
-            <div class="stat-val font-num text-green">
-              ¥{{ activeScheme.theoretical_prize
-                ? Math.round(activeScheme.theoretical_prize)
-                : Math.round((activeScheme.total_odds ?? 1) * (activeScheme.stake ?? 20)) }}
-            </div>
+            <div class="stat-label">预期彩金</div>
+            <div class="stat-val font-num text-green">¥{{ dynamicPrize }}</div>
           </div>
         </div>
 
@@ -930,7 +960,7 @@ onMounted(async () => {
   padding: 5px 14px;
   background: var(--bg); border-bottom: var(--card-bd); gap: 8px;
 }
-.legend-no  { font-size: 10px; color: var(--text3); min-width: 38px; flex-shrink: 0; }
+.legend-no  { font-size: 10px; color: var(--text3); min-width: 48px; flex-shrink: 0; }
 .legend-match { font-size: 10px; color: var(--text3); flex: 1; }
 .legend-pick  { font-size: 10px; color: var(--text3); min-width: 32px; text-align: center; flex-shrink: 0; }
 .legend-odds  { font-size: 10px; color: var(--text3); min-width: 36px; text-align: right; flex-shrink: 0; }
@@ -939,13 +969,14 @@ onMounted(async () => {
 .scheme-leg { display: flex; align-items: flex-start; gap: 8px; padding: 11px 14px; border-bottom: var(--card-bd); }
 .scheme-leg:last-child { border-bottom: none; }
 
-.leg-no-col { min-width: 38px; flex-shrink: 0; padding-top: 1px; }
+.leg-no-col { min-width: 48px; flex-shrink: 0; padding-top: 1px; }
 .leg-match-no {
-  font-size: 11px; font-weight: 700; color: var(--primary);
+  font-size: 12px; font-weight: 700; color: var(--primary);
   background: color-mix(in srgb, var(--primary) 10%, transparent);
   border-radius: 3px; padding: 2px 5px; display: inline-block;
+  letter-spacing: .3px;
 }
-.leg-seq { font-size: 12px; font-weight: 700; color: var(--text3); }
+.leg-kickoff { font-size: 10px; color: var(--text3); margin-top: 3px; padding-left: 5px; }
 
 .leg-info { flex: 1; min-width: 0; }
 .leg-teams { display: flex; flex-direction: column; gap: 3px; margin-bottom: 2px; }
@@ -957,13 +988,15 @@ onMounted(async () => {
 .leg-meta { display: flex; align-items: center; gap: 8px; margin-top: 1px; }
 .leg-league { font-size: 10px; color: var(--text3); }
 .leg-conf   { font-size: 10px; color: var(--primary); font-weight: 600; }
+.leg-votes  { font-size: 10px; color: var(--primary); font-weight: 600; }
 .leg-rationale {
   font-size: 11px; color: var(--text2); margin-top: 4px; line-height: 1.5;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
 
-.leg-pick-col { min-width: 36px; flex-shrink: 0; display: flex; justify-content: center; padding-top: 1px; }
+.leg-pick-col { min-width: 36px; flex-shrink: 0; display: flex; flex-direction: column; align-items: center; gap: 3px; padding-top: 1px; }
 .leg-pick { font-size: 11px; font-weight: 700; padding: 3px 7px; border-radius: 4px; white-space: nowrap; }
+.leg-pick-code { font-size: 11px; font-weight: 700; color: var(--text3); }
 
 .leg-odds-col { min-width: 40px; flex-shrink: 0; text-align: right; display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
 .leg-odds { font-family: var(--font-disp); font-size: 17px; font-weight: 700; line-height: 1; letter-spacing: -.2px; color: var(--primary); }
@@ -1152,36 +1185,36 @@ onMounted(async () => {
   display: inline-block;
 }
 
-/* ── Step log (collapsible, in results) ─────────────────────── */
-.step-log-wrap {
+/* ── Results head ────────────────────────────────────────────── */
+.results-head-right { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+
+.log-icon-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 9px;
+  font-size: 11px;
+  font-family: var(--font);
+  color: var(--text2);
+  background: transparent;
+  border: var(--card-bd);
+  border-radius: 5px;
+  cursor: pointer;
+  min-height: 36px;
+  white-space: nowrap;
+  transition: color .12s, background .12s, border-color .12s;
+}
+.log-icon-btn:hover { color: var(--primary); border-color: var(--primary); }
+.log-icon-btn.active { color: var(--primary); background: var(--primary-d); border-color: var(--primary); }
+
+/* ── Step log dropdown ───────────────────────────────────────── */
+.step-log-dropdown {
   background: var(--card);
   border: var(--card-bd);
   border-radius: 8px;
   overflow: hidden;
-}
-.step-log-toggle {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  padding: 9px 12px;
-  background: none;
-  border: none;
-  cursor: pointer;
-  font-family: var(--font);
-  font-size: 12px;
-  color: var(--text2);
-  text-align: left;
-}
-.step-log-toggle:hover { background: color-mix(in srgb, var(--primary) 4%, transparent); }
-.step-log-icon { flex-shrink: 0; }
-.step-log-detail { font-size: 11px; color: var(--text3); }
-.step-log-chevron { margin-left: auto; color: var(--text3); transition: transform .2s; flex-shrink: 0; }
-.rotate-180 { transform: rotate(180deg); }
-.step-log-list {
   display: flex;
   flex-direction: column;
-  border-top: var(--card-bd);
 }
 .step-log-item {
   display: flex;
@@ -1192,6 +1225,42 @@ onMounted(async () => {
   border-bottom: var(--card-bd);
 }
 .step-log-item:last-child { border-bottom: none; }
+.step-log-name { flex-shrink: 0; }
+.step-log-detail-text {
+  font-size: 10px;
+  color: var(--text3);
+  margin-left: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
 .step-log-done { color: var(--text2); }
 .step-log-skip { color: var(--text3); opacity: .4; }
+
+/* ── Dynamic stake ───────────────────────────────────────────── */
+.stat-stake-wrap { display: flex; align-items: baseline; gap: 3px; }
+.stat-currency { font-family: var(--font-disp); font-size: 13px; font-weight: 600; color: var(--text2); line-height: 1; }
+.stat-stake-hint { font-size: 10px; color: var(--text3); margin-top: 2px; }
+.stat-stake-input {
+  font-size: 19px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -.2px;
+  color: var(--text);
+  background: transparent;
+  border: none;
+  border-bottom: 1.5px solid var(--line);
+  width: 72px;
+  padding: 0 0 1px;
+  outline: none;
+  transition: border-color .15s;
+  font-family: var(--font-disp);
+  -moz-appearance: textfield;
+}
+.stat-stake-input:focus { border-color: var(--primary); }
+.stat-stake-input::-webkit-outer-spin-button,
+.stat-stake-input::-webkit-inner-spin-button { -webkit-appearance: none; }
+
 </style>

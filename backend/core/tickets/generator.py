@@ -518,17 +518,28 @@ def _best_legs(legs: list[ParlayLeg], max_legs: int, strategy: str) -> list[Parl
         return []
 
     if strategy == "safe":
-        # 优先选共识高、赔率适中（1.5-2.5）的腿
+        # 优先选共识高、赔率适中（1.5-2.8）、正期望的腿
         def score(leg: ParlayLeg) -> float:
             consensus = leg.model_votes_agree / max(leg.model_votes_total, 1)
             odds_fit = 1.0 if 1.5 <= leg.odds <= 2.8 else 0.6
-            return leg.win_prob * consensus * odds_fit
+            # EV factor: penalise negative-EV legs; skip for estimated odds
+            if not leg.odds_estimated:
+                ev = leg.win_prob * leg.odds - 1
+                ev_factor = max(0.5, 1.0 + ev)
+            else:
+                ev_factor = 0.85  # slight discount for unconfirmed odds
+            return leg.win_prob * consensus * odds_fit * ev_factor
 
     elif strategy == "balanced":
-        # 平衡概率和赔率乘积
+        # 平衡概率和赔率乘积，引入 EV 修正
         def score(leg: ParlayLeg) -> float:
             consensus = leg.model_votes_agree / max(leg.model_votes_total, 1)
-            return math.sqrt(leg.win_prob * leg.odds) * (0.5 + 0.5 * consensus)
+            if not leg.odds_estimated:
+                ev = leg.win_prob * leg.odds - 1
+                ev_factor = max(0.6, 1.0 + ev)
+            else:
+                ev_factor = 0.9
+            return math.sqrt(leg.win_prob * leg.odds) * (0.5 + 0.5 * consensus) * ev_factor
 
     else:  # high_odds
         # 优先选高赔率
@@ -565,6 +576,9 @@ def _build_plan(
     for leg in legs:
         total_odds *= leg.odds
         win_prob *= leg.win_prob
+    # Correlation discount: same-round matches are not fully independent
+    if n > 1:
+        win_prob *= 0.97 ** (n - 1)
 
     total_stake = base_stake * multiplier
     theoretical_prize = total_stake * total_odds

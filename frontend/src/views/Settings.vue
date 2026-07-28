@@ -677,7 +677,10 @@ onMounted(load)
                 </select>
               </div>
               <div class="field">
-                <label class="field-label">融合策略</label>
+                <label class="field-label">
+                  融合策略
+                  <span class="param-tip" data-tip="多数投票：过半模型同意同一结果才纳入推荐。加权平均：按模型历史置信度加权融合，质量差异明显时更准确。">?</span>
+                </label>
                 <div class="s-radio-group">
                   <label class="s-radio" :class="{ active: ensemble.strategy === 'majority' }">
                     <input type="radio" name="strategy" value="majority" v-model="ensemble.strategy" />
@@ -691,19 +694,31 @@ onMounted(load)
               </div>
 
               <div class="field">
-                <label class="field-label">最低共识度 <span class="s-val-badge">{{ Math.round(ensemble.min_consensus * 100) }}%</span></label>
+                <label class="field-label">
+                  最低共识度 <span class="s-val-badge">{{ Math.round(ensemble.min_consensus * 100) }}%</span>
+                  <span class="param-tip" data-tip="参与投票的模型中，至少需要这一比例的模型投票一致，才将该场次纳入方案。越高越严格，推荐场次越少但更稳健。">?</span>
+                </label>
                 <input type="range" v-model.number="ensemble.min_consensus" min="0" max="1" step="0.05" class="s-range" />
               </div>
               <div class="field">
-                <label class="field-label">最低置信度 <span class="s-val-badge">{{ ensemble.min_confidence }}%</span></label>
+                <label class="field-label">
+                  最低置信度 <span class="s-val-badge">{{ ensemble.min_confidence }}%</span>
+                  <span class="param-tip" data-tip="单场预测置信度低于此阈值的场次将被排除出串关。建议 40-60%：低于 40% 则纳入太多不确定场次，高于 60% 可能无法凑够串关腿数。">?</span>
+                </label>
                 <input type="range" v-model.number="ensemble.min_confidence" min="0" max="100" step="5" class="s-range" />
               </div>
               <div class="field">
-                <label class="field-label">默认倍投系数</label>
+                <label class="field-label">
+                  默认倍投系数
+                  <span class="param-tip" data-tip="连败后每轮注额的递增倍数（马丁格尔策略）。2 = 每输一场下次翻倍。注意：倍投会快速放大资金风险，建议结合总预算严格控制。">?</span>
+                </label>
                 <input type="number" v-model.number="ensemble.default_multiplier" class="input" min="1" max="10" step="1" />
               </div>
               <div class="field">
-                <label class="field-label">总预算 (元)</label>
+                <label class="field-label">
+                  总预算 (元)
+                  <span class="param-tip" data-tip="每日方案生成时用于分配各票型注额的总资金。系统会按风险比例将预算分配到稳健/均衡/博高赔三套方案。">?</span>
+                </label>
                 <input type="number" v-model.number="ensemble.budget" class="input" min="1" step="10" />
               </div>
             </div>
@@ -1013,6 +1028,64 @@ onMounted(load)
   padding: 1px 5px;
   border-radius: 3px;
   margin-left: 4px;
+}
+
+/* ── Param tooltip (?) ────────────────────────────────────────────────────── */
+.param-tip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--line);
+  color: var(--text3);
+  font-size: 9px;
+  font-weight: 700;
+  font-family: var(--font);
+  text-transform: none;
+  letter-spacing: 0;
+  cursor: help;
+  vertical-align: middle;
+  margin-left: 5px;
+  position: relative;
+  flex-shrink: 0;
+  transition: background .12s, color .12s;
+}
+.param-tip:hover { background: var(--primary-t); color: var(--primary); }
+.param-tip::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 7px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--text);
+  color: var(--card);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.55;
+  padding: 7px 10px;
+  border-radius: 6px;
+  width: 230px;
+  white-space: pre-wrap;
+  text-align: left;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity .15s;
+  z-index: 500;
+  font-family: var(--font);
+  text-transform: none;
+  letter-spacing: 0;
+  box-shadow: 0 4px 16px rgba(0,0,0,.25);
+}
+.param-tip:hover::after { opacity: 1; }
+@media (max-width: 767px) {
+  .param-tip::after {
+    left: auto;
+    right: 0;
+    transform: none;
+    width: min(230px, calc(100vw - 32px));
+  }
 }
 
 /* ── Toggle ──────────────────────────────────────────────────────────────── */

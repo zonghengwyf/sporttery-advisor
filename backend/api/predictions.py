@@ -1,7 +1,7 @@
 import logging
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,9 +30,10 @@ class PredictionOut(BaseModel):
 
     model_config = {"from_attributes": True}
 
-    def model_post_init(self, __context):
-        if self.created_at is not None and not isinstance(self.created_at, str):
-            self.created_at = str(self.created_at)
+    @field_validator("created_at", mode="before")
+    @classmethod
+    def coerce_created_at(cls, v):
+        return str(v) if v is not None else None
 
 
 @router.get("/batch")

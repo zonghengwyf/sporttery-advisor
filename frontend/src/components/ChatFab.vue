@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, nextTick, watch } from 'vue'
+import { ref, computed, nextTick, watch, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { useChatStore } from '@/stores/chat'
 
@@ -7,11 +7,17 @@ const route = useRoute()
 const chatStore = useChatStore()
 
 const open = ref(false)
+const minimized = ref(false)
 const input = ref('')
 const messages = ref<Array<{ role: 'user' | 'assistant'; content: string }>>([])
 const streaming = ref(false)
 const msgEnd = ref<HTMLElement | null>(null)
 const forcedMatchId = ref<number | null>(null)
+const panelRef = ref<HTMLElement | null>(null)
+const panelStyle = ref<Record<string, string>>({})
+let _isDragging = false
+let _dragStartX = 0, _dragStartY = 0
+let _panelStartRight = 0, _panelStartBottom = 0
 
 // React to external open requests (e.g. from MatchDetail)
 watch(() => chatStore.open, (val) => {
@@ -19,6 +25,7 @@ watch(() => chatStore.open, (val) => {
     forcedMatchId.value = chatStore.requestMatchId
     chatStore.requestMatchId = null
     open.value = true
+    minimized.value = false
   }
 })
 
@@ -43,6 +50,10 @@ const contextLabel = computed(() => {
 })
 
 function toggle() {
+  if (open.value && minimized.value) {
+    minimized.value = false
+    return
+  }
   open.value = !open.value
   if (!open.value) {
     chatStore.close()
@@ -54,7 +65,44 @@ function close() {
   open.value = false
   chatStore.close()
   forcedMatchId.value = null
+  minimized.value = false
+  panelStyle.value = {}
 }
+
+function onHeaderPointerDown(e: PointerEvent) {
+  if ((e.target as HTMLElement).closest('button, textarea, input')) return
+  _isDragging = true
+  _dragStartX = e.clientX
+  _dragStartY = e.clientY
+  ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+  if (panelRef.value) {
+    const rect = panelRef.value.getBoundingClientRect()
+    _panelStartRight = window.innerWidth - rect.right
+    _panelStartBottom = window.innerHeight - rect.bottom
+  }
+  document.addEventListener('pointermove', _onPanelMove)
+  document.addEventListener('pointerup', _onPanelUp, { once: true })
+  document.addEventListener('pointercancel', _onPanelUp, { once: true })
+}
+
+function _onPanelMove(e: PointerEvent) {
+  if (!_isDragging) return
+  const dx = e.clientX - _dragStartX
+  const dy = e.clientY - _dragStartY
+  panelStyle.value = {
+    right: `${Math.max(8, _panelStartRight - dx)}px`,
+    bottom: `${Math.max(8, _panelStartBottom - dy)}px`,
+  }
+}
+
+function _onPanelUp() {
+  _isDragging = false
+  document.removeEventListener('pointermove', _onPanelMove)
+}
+
+onUnmounted(() => {
+  document.removeEventListener('pointermove', _onPanelMove)
+})
 
 function newSession() {
   messages.value = []
@@ -74,7 +122,10 @@ async function send() {
 
   try {
     const token = localStorage.getItem('token') ?? ''
-    const body: Record<string, unknown> = { message: text }
+    const body: Record<string, unknown> = {
+      message: text,
+      history: messages.value.slice(0, -2).map(m => ({ role: m.role, content: m.content })),
+    }
     if (matchId.value) body.match_id = matchId.value
 
     const res = await fetch('/api/chat/stream', {
@@ -140,24 +191,26 @@ function onKeydown(e: KeyboardEvent) {
 <template>
   <!-- FAB trigger button -->
   <button
+    v-show="!chatStore.fabHidden"
     class="chat-fab-btn"
-    :class="{ open }"
+    :class="{ open: open && !minimized }"
     aria-label="打开 AI 对话"
     @click="toggle"
   >
-    <svg v-if="!open" width="22" height="22" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+    <svg v-if="!open || minimized" width="22" height="22" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
       <path d="M10 2l1.8 5.2 5.2 1.8-5.2 1.8L10 16.5l-1.8-5.2-5.2-1.8 5.2-1.8Z"/>
     </svg>
     <svg v-else width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
       <path d="M4 4l12 12M16 4L4 16"/>
     </svg>
+    <span v-if="open && minimized && messages.length" class="fab-min-dot" />
   </button>
 
   <!-- Chat panel -->
   <Transition name="fab-panel">
-    <div v-if="open" class="fab-panel">
-      <!-- Panel header -->
-      <div class="fab-header">
+    <div v-if="open && !chatStore.fabHidden" ref="panelRef" class="fab-panel" :class="{ 'fab-panel--min': minimized }" :style="panelStyle">
+      <!-- Panel header (drag handle) -->
+      <div class="fab-header" @pointerdown="onHeaderPointerDown">
         <div class="fab-header-left">
           <span class="fab-avatar">AI</span>
           <div>
@@ -166,13 +219,22 @@ function onKeydown(e: KeyboardEvent) {
           </div>
         </div>
         <div class="fab-header-actions">
-          <button v-if="messages.length" class="fab-new-btn" :disabled="streaming" @click="newSession" title="新对话">
+          <!-- Minimize toggle -->
+          <button class="fab-action-btn" :title="minimized ? '展开' : '最小化'" @click.stop="minimized = !minimized">
+            <svg v-if="minimized" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+              <path d="M2 12l6-8 6 8"/>
+            </svg>
+            <svg v-else width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+              <path d="M2 6l6 6 6-6"/>
+            </svg>
+          </button>
+          <button v-if="messages.length && !minimized" class="fab-new-btn" :disabled="streaming" @click.stop="newSession" title="新对话">
             <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
               <path d="M8 3H4a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V9"/>
               <path d="M12 1l3 3-6 6H6V7l6-6z"/>
             </svg>
           </button>
-          <button class="fab-close" @click="close" aria-label="关闭">
+          <button class="fab-close" @click.stop="close" aria-label="关闭">
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
               <path d="M1 1l12 12M13 1L1 13"/>
             </svg>
@@ -180,8 +242,8 @@ function onKeydown(e: KeyboardEvent) {
         </div>
       </div>
 
-      <!-- Messages -->
-      <div class="fab-messages">
+      <!-- Messages (hidden when minimized) -->
+      <div v-show="!minimized" class="fab-messages">
         <div v-if="!messages.length" class="fab-empty">
           <p class="fab-empty-title">有什么需要分析的？</p>
           <div class="fab-suggestions">
@@ -204,8 +266,8 @@ function onKeydown(e: KeyboardEvent) {
         <div ref="msgEnd" style="height:1px" />
       </div>
 
-      <!-- Input bar -->
-      <div class="fab-input-bar">
+      <!-- Input bar (hidden when minimized) -->
+      <div v-show="!minimized" class="fab-input-bar">
         <textarea
           v-model="input"
           class="fab-input"
@@ -228,9 +290,10 @@ function onKeydown(e: KeyboardEvent) {
 /* ── FAB button ────────────────────────────────────────────────── */
 .chat-fab-btn {
   position: fixed;
-  bottom: calc(64px + 16px + env(safe-area-inset-bottom, 0px));
+  bottom: calc(56px + 16px + env(safe-area-inset-bottom, 0px));
   right: 16px;
-  z-index: 200;
+  left: auto;
+  z-index: 201;
   width: 48px;
   height: 48px;
   border-radius: 50%;
@@ -259,9 +322,10 @@ function onKeydown(e: KeyboardEvent) {
 /* ── Panel ─────────────────────────────────────────────────────── */
 .fab-panel {
   position: fixed;
-  bottom: calc(64px + 20px + env(safe-area-inset-bottom, 0px));
+  bottom: calc(56px + 20px + env(safe-area-inset-bottom, 0px));
   right: 14px;
-  z-index: 199;
+  left: auto;
+  z-index: 201;
   width: min(340px, calc(100vw - 28px));
   max-height: 70vh;
   background: var(--card);
@@ -286,6 +350,20 @@ function onKeydown(e: KeyboardEvent) {
 .fab-panel-enter-from { opacity: 0; transform: translateY(12px) scale(.96); }
 .fab-panel-leave-to   { opacity: 0; transform: translateY(8px) scale(.97); }
 
+/* Minimized panel */
+.fab-panel--min { max-height: fit-content; min-height: auto; }
+
+/* Minimized badge on FAB */
+.fab-min-dot {
+  position: absolute;
+  top: 5px; right: 5px;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--green, #22c55e);
+  border: 1.5px solid #fff;
+  pointer-events: none;
+}
+
 /* Header */
 .fab-header {
   display: flex;
@@ -294,7 +372,22 @@ function onKeydown(e: KeyboardEvent) {
   padding: 12px 14px;
   border-bottom: var(--card-bd);
   flex-shrink: 0;
+  cursor: grab;
+  user-select: none;
 }
+.fab-header:active { cursor: grabbing; }
+
+/* Minimize/action button */
+.fab-action-btn {
+  background: transparent;
+  color: var(--text3);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  display: flex;
+  transition: color .12s, background .12s;
+}
+.fab-action-btn:hover { color: var(--text); background: var(--line); }
 .fab-header-left { display: flex; align-items: center; gap: 10px; }
 .fab-avatar {
   width: 30px; height: 30px;
