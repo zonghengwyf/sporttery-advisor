@@ -1,7 +1,7 @@
 import logging
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -83,7 +83,7 @@ async def _enrich_record(record: BetRecord, db: AsyncSession) -> dict:
 
 def _evaluate_legs(legs: list[dict], results: list[str | None]) -> bool:
     """串关全中才算赢：每腿 pick 对应 H/D/A 与 actual_result 比较。"""
-    mapping = {"主胜": "H", "平局": "D", "客胜": "A"}
+    mapping = {"主胜": "H", "平局": "D", "平": "D", "客胜": "A"}
     for leg, actual in zip(legs, results):
         if leg.get("void"):
             continue
@@ -142,20 +142,15 @@ async def create_bet(
 @router.get("/")
 async def list_bets(
     status: str | None = None,
-    limit: int = 50,
-    offset: int = 0,
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    stmt = (
-        select(BetRecord)
-        .where(BetRecord.user_id == current_user.id)
-        .order_by(BetRecord.bet_at.desc())
-        .limit(limit)
-        .offset(offset)
-    )
+    stmt = select(BetRecord).where(BetRecord.user_id == current_user.id)
     if status:
         stmt = stmt.where(BetRecord.status == status)
+    stmt = stmt.order_by(BetRecord.bet_at.desc()).limit(limit).offset(offset)
 
     result = await db.execute(stmt)
     records = result.scalars().all()

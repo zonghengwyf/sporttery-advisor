@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import get_current_user
 from db.models import Match, Prediction, User
-from db.session import get_db
+from db.session import AsyncSessionLocal, get_db
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -140,125 +140,131 @@ async def generate_tickets(
 @router.post("/stream")
 async def stream_tickets(
     req: TicketsRequest,
-    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """SSE 流式票型生成：实时推送 step / done / error 事件。"""
     if not req.match_ids:
         raise HTTPException(status_code=400, detail="请至少选择一场赛事")
 
+    # FastAPI closes the Depends(get_db) session when this endpoint returns the
+    # StreamingResponse — before _generate() executes. Create a fresh session
+    # inside the generator to avoid using a closed session.
+    user_id = current_user.id
+    match_ids = req.match_ids
+    budget = req.effective_budget
+
     async def _generate():
-        try:
-            # 0 — 检查已有预测
-            yield _sse("step", step="check", msg="检查已有分析数据…", index=0, total=4)
+        async with AsyncSessionLocal() as db:
+            try:
+                # 0 — 检查已有预测
+                yield _sse("step", step="check", msg="检查已有分析数据…", index=0, total=4)
 
-            existing: dict[int, Prediction] = {}
-            for mid in req.match_ids:
-                result = await db.execute(
-                    select(Prediction)
-                    .where(Prediction.match_id == mid)
-                    .order_by(Prediction.created_at.desc())
-                    .limit(1)
-                )
-                pred = result.scalar_one_or_none()
-                if pred and pred.tickets:
-                    existing[mid] = pred
-
-            missing_ids = [mid for mid in req.match_ids if mid not in existing]
-
-            # 1 — 自动分析缺失场次
-            if missing_ids:
-                if len(missing_ids) > MAX_AUTO_ANALYZE:
-                    yield _sse(
-                        "error",
-                        msg=f"所选 {len(missing_ids)} 场赛事尚未分析。请先在赛事页触发分析，或每次最多选 {MAX_AUTO_ANALYZE} 场自动分析",
+                existing: dict[int, Prediction] = {}
+                for mid in match_ids:
+                    result = await db.execute(
+                        select(Prediction)
+                        .where(Prediction.match_id == mid)
+                        .order_by(Prediction.created_at.desc())
+                        .limit(1)
                     )
-                    return
-
-                from api.predictions import _get_user_llm_client
-                llm_client = await _get_user_llm_client(db, current_user.id)
-                if not llm_client:
-                    yield _sse("error", msg="请先在设置页配置 LLM，再生成投注方案")
-                    return
-
-                from core.pipeline import DailyPipeline
-                pipeline = DailyPipeline()
-
-                for i, mid in enumerate(missing_ids):
-                    yield _sse(
-                        "step",
-                        step="ai",
-                        msg=f"AI 情报分析 ({i + 1}/{len(missing_ids)})…",
-                        index=1,
-                        total=4,
-                    )
-                    match = await db.get(Match, mid)
-                    if not match:
-                        continue
-                    try:
-                        ar = await pipeline.analyze_single_match(db, match, llm_client)
-                        pred = Prediction(
-                            match_id=ar.match_id,
-                            run_id=ar.run_id,
-                            user_id=current_user.id,
-                            stat_probs=ar.stat_probs,
-                            fused_probs=ar.fused_probs,
-                            intel_summary=ar.intel_summary,
-                            risk_label=ar.risk_label,
-                            confidence=ar.confidence,
-                            tickets=ar.tickets,
-                            llm_provider=ar.llm_provider,
-                            llm_model=ar.llm_model,
-                        )
-                        db.add(pred)
-                        await db.flush()
+                    pred = result.scalar_one_or_none()
+                    if pred and pred.tickets:
                         existing[mid] = pred
-                        logger.info("SSE 自动分析完成 match_id=%d", mid)
-                    except Exception as exc:
-                        logger.warning("SSE 自动分析失败 match_id=%d: %s", mid, exc)
+
+                missing_ids = [mid for mid in match_ids if mid not in existing]
+
+                # 1 — 自动分析缺失场次
+                if missing_ids:
+                    if len(missing_ids) > MAX_AUTO_ANALYZE:
+                        yield _sse(
+                            "error",
+                            msg=f"所选 {len(missing_ids)} 场赛事尚未分析。请先在赛事页触发分析，或每次最多选 {MAX_AUTO_ANALYZE} 场自动分析",
+                        )
+                        return
+
+                    from api.predictions import _get_user_llm_client
+                    llm_client = await _get_user_llm_client(db, user_id)
+                    if not llm_client:
+                        yield _sse("error", msg="请先在设置页配置 LLM，再生成投注方案")
+                        return
+
+                    from core.pipeline import DailyPipeline
+                    pipeline = DailyPipeline()
+
+                    for i, mid in enumerate(missing_ids):
+                        yield _sse(
+                            "step",
+                            step="ai",
+                            msg=f"AI 情报分析 ({i + 1}/{len(missing_ids)})…",
+                            index=1,
+                            total=4,
+                        )
+                        match = await db.get(Match, mid)
+                        if not match:
+                            continue
                         try:
-                            await db.rollback()
-                        except Exception:
-                            pass
+                            ar = await pipeline.analyze_single_match(db, match, llm_client)
+                            pred = Prediction(
+                                match_id=ar.match_id,
+                                run_id=ar.run_id,
+                                user_id=user_id,
+                                stat_probs=ar.stat_probs,
+                                fused_probs=ar.fused_probs,
+                                intel_summary=ar.intel_summary,
+                                risk_label=ar.risk_label,
+                                confidence=ar.confidence,
+                                tickets=ar.tickets,
+                                llm_provider=ar.llm_provider,
+                                llm_model=ar.llm_model,
+                            )
+                            db.add(pred)
+                            await db.flush()
+                            existing[mid] = pred
+                            logger.info("SSE 自动分析完成 match_id=%d", mid)
+                        except Exception as exc:
+                            logger.warning("SSE 自动分析失败 match_id=%d: %s", mid, exc)
+                            try:
+                                await db.rollback()
+                            except Exception:
+                                pass
 
-                await db.commit()
+                    await db.commit()
 
-            # 2 — 构建 enriched_predictions
-            yield _sse("step", step="model", msg="构建概率模型输入…", index=2, total=4)
+                # 2 — 构建 enriched_predictions
+                yield _sse("step", step="model", msg="构建概率模型输入…", index=2, total=4)
 
-            predictions = list(existing.values())
-            if not predictions:
-                yield _sse("error", msg="所选赛事均无法完成分析，请检查 LLM 配置或稍后重试")
-                return
+                predictions = list(existing.values())
+                if not predictions:
+                    yield _sse("error", msg="所选赛事均无法完成分析，请检查 LLM 配置或稍后重试")
+                    return
 
-            enriched_preds: list[dict] = []
-            for pred in predictions:
-                m = await db.get(Match, pred.match_id)
-                if m:
-                    enriched_preds.append({"match": m, "prediction": pred, "ensemble_votes": []})
+                enriched_preds: list[dict] = []
+                for pred in predictions:
+                    m = await db.get(Match, pred.match_id)
+                    if m:
+                        enriched_preds.append({"match": m, "prediction": pred, "ensemble_votes": []})
 
-            if not enriched_preds:
-                yield _sse("error", msg="无法获取赛事数据")
-                return
+                if not enriched_preds:
+                    yield _sse("error", msg="无法获取赛事数据")
+                    return
 
-            # 3 — 生成串关方案
-            yield _sse("step", step="ticket", msg="筛选票型 & 分配资金…", index=3, total=4)
+                # 3 — 生成串关方案
+                yield _sse("step", step="ticket", msg="筛选票型 & 分配资金…", index=3, total=4)
 
-            budget = req.effective_budget
-            from core.tickets.generator import TicketGenerator
-            gen = TicketGenerator()
-            plans = gen.generate_parlay_plans(enriched_preds, budget=budget)
+                from core.tickets.generator import TicketGenerator
+                gen = TicketGenerator()
+                plans = gen.generate_parlay_plans(enriched_preds, budget=budget)
 
-            if not plans:
-                yield _sse("error", msg=_empty_plans_reason(enriched_preds))
-                return
+                if not plans:
+                    yield _sse("error", msg=_empty_plans_reason(enriched_preds))
+                    return
 
-            schemes = _build_schemes(plans, enriched_preds)
-            yield _sse("done", schemes=schemes)
+                schemes = _build_schemes(plans, enriched_preds)
+                yield _sse("done", schemes=schemes)
 
-        except Exception as exc:
-            logger.error("stream_tickets 未处理异常: %s", exc, exc_info=True)
-            yield _sse("error", msg="服务器内部错误，请稍后重试")
+            except Exception as exc:
+                logger.error("stream_tickets 未处理异常: %s", exc, exc_info=True)
+                yield _sse("error", msg="服务器内部错误，请稍后重试")
 
     return StreamingResponse(
         _generate(),

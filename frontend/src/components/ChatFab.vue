@@ -1,17 +1,31 @@
 <script setup lang="ts">
-import { ref, computed, nextTick } from 'vue'
+import { ref, computed, nextTick, watch } from 'vue'
 import { useRoute } from 'vue-router'
+import { useChatStore } from '@/stores/chat'
 
 const route = useRoute()
+const chatStore = useChatStore()
+
 const open = ref(false)
 const input = ref('')
 const messages = ref<Array<{ role: 'user' | 'assistant'; content: string }>>([])
 const streaming = ref(false)
 const msgEnd = ref<HTMLElement | null>(null)
+const forcedMatchId = ref<number | null>(null)
 
-// Derive context from current route
+// React to external open requests (e.g. from MatchDetail)
+watch(() => chatStore.open, (val) => {
+  if (val) {
+    forcedMatchId.value = chatStore.requestMatchId
+    chatStore.requestMatchId = null
+    open.value = true
+  }
+})
+
+// Derive context from forced matchId or current route
 const matchId = computed<number | null>(() => {
-  if (route.name === 'match-detail' || route.params.id) {
+  if (forcedMatchId.value) return forcedMatchId.value
+  if (route.params.id) {
     const id = Number(route.params.id)
     return isNaN(id) ? null : id
   }
@@ -19,7 +33,7 @@ const matchId = computed<number | null>(() => {
 })
 
 const contextLabel = computed(() => {
-  if (matchId.value) return `当前场次 #${matchId.value}`
+  if (matchId.value) return `场次 #${matchId.value}`
   const labels: Record<string, string> = {
     '/analysis': '今日赛事',
     '/tickets': '投注方案',
@@ -30,10 +44,21 @@ const contextLabel = computed(() => {
 
 function toggle() {
   open.value = !open.value
+  if (!open.value) {
+    chatStore.close()
+    forcedMatchId.value = null
+  }
 }
 
 function close() {
   open.value = false
+  chatStore.close()
+  forcedMatchId.value = null
+}
+
+function newSession() {
+  messages.value = []
+  input.value = ''
 }
 
 async function send() {
@@ -140,11 +165,19 @@ function onKeydown(e: KeyboardEvent) {
             <div class="fab-context">{{ contextLabel }}</div>
           </div>
         </div>
-        <button class="fab-close" @click="close" aria-label="关闭">
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-            <path d="M1 1l12 12M13 1L1 13"/>
-          </svg>
-        </button>
+        <div class="fab-header-actions">
+          <button v-if="messages.length" class="fab-new-btn" :disabled="streaming" @click="newSession" title="新对话">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M8 3H4a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V9"/>
+              <path d="M12 1l3 3-6 6H6V7l6-6z"/>
+            </svg>
+          </button>
+          <button class="fab-close" @click="close" aria-label="关闭">
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+              <path d="M1 1l12 12M13 1L1 13"/>
+            </svg>
+          </button>
+        </div>
       </div>
 
       <!-- Messages -->
@@ -276,6 +309,10 @@ function onKeydown(e: KeyboardEvent) {
 }
 .fab-title { font-size: 13px; font-weight: 700; line-height: 1.2; }
 .fab-context { font-size: 10px; color: var(--text3); }
+.fab-header-actions { display: flex; align-items: center; gap: 2px; }
+.fab-new-btn { background: transparent; color: var(--text3); cursor: pointer; padding: 4px; border-radius: 4px; display: flex; transition: color .12s; }
+.fab-new-btn:hover { color: var(--primary); }
+.fab-new-btn:disabled { opacity: .35; cursor: not-allowed; }
 .fab-close { background: transparent; color: var(--text3); cursor: pointer; padding: 4px; border-radius: 4px; display: flex; }
 .fab-close:hover { color: var(--text); }
 

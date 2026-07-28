@@ -93,6 +93,8 @@ async def set_match_result(
     match = await db.get(Match, match_id)
     if not match:
         raise HTTPException(status_code=404, detail="比赛不存在")
+    if match.result_locked:
+        raise HTTPException(status_code=409, detail="比赛结果已锁定，无法修改")
 
     match.actual_result = body.actual_result
     if body.actual_score:

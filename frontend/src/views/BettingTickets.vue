@@ -2,9 +2,11 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import api, { betsApi } from '@/api'
+import { useBettingStore } from '@/stores/betting'
 
 const router = useRouter()
 const route = useRoute()
+const bettingStore = useBettingStore()
 
 // ── Types ────────────────────────────────────────────────────
 interface Leg {
@@ -45,7 +47,9 @@ const error = ref<string | null>(null)
 const progressIndex = ref(0)
 const progressMsg = ref('')
 const elapsedSecs = ref(0)
-let _lastMatchIds: number[] = []
+const lastMatchIds = ref<number[]>([])
+const completedSteps = ref(0)   // steps completed in last run (0 = not run yet)
+const stepLogExpanded = ref(false)
 let _elapsedTimer: ReturnType<typeof setInterval> | null = null
 
 const TABS = [
@@ -92,13 +96,15 @@ function pickLabel(pick: string) {
 // ── Generate via SSE ─────────────────────────────────────────
 async function generate(matchIds: number[]) {
   if (!matchIds.length || generating.value) return
-  _lastMatchIds = matchIds
+  lastMatchIds.value = matchIds
   generating.value = true
   error.value = null
   schemes.value = null
   progressIndex.value = 0
   progressMsg.value = '准备中…'
   elapsedSecs.value = 0
+  completedSteps.value = 0
+  stepLogExpanded.value = false
   _elapsedTimer = setInterval(() => { elapsedSecs.value++ }, 1000)
 
   try {
@@ -147,7 +153,10 @@ async function generate(matchIds: number[]) {
             for (const t of TABS) {
               if (ev.schemes?.[t.key]?.legs?.length) { activeTab.value = t.key; break }
             }
+            completedSteps.value = STEPS.length
+            bettingStore.save(ev.schemes, activeTab.value, lastMatchIds.value)
           } else if (ev.event === 'error') {
+            completedSteps.value = progressIndex.value
             error.value = ev.msg ?? '未知错误'
           }
         } catch { /* skip malformed */ }
@@ -183,8 +192,8 @@ async function generateAll() {
 }
 
 function retry() {
-  if (_lastMatchIds.length) {
-    generate(_lastMatchIds)
+  if (lastMatchIds.value.length) {
+    generate(lastMatchIds.value)
   } else {
     generateAll()
   }
@@ -197,6 +206,8 @@ function goCustomSelect() {
 function resetSchemes() {
   schemes.value = null
   error.value = null
+  completedSteps.value = 0
+  bettingStore.clear()
 }
 
 // ── 标记投注 sheet ────────────────────────────────────────────────
@@ -270,6 +281,12 @@ onMounted(async () => {
   if (idsQuery) {
     const ids = idsQuery.split(',').map(Number).filter(Boolean)
     if (ids.length) await generate(ids)
+  } else if (bettingStore.schemes) {
+    // restore last session
+    schemes.value = bettingStore.schemes
+    activeTab.value = bettingStore.activeTab
+    lastMatchIds.value = bettingStore.lastMatchIds
+    completedSteps.value = STEPS.length
   }
 })
 </script>
@@ -396,6 +413,34 @@ onMounted(async () => {
           </svg>
           重新生成
         </button>
+      </div>
+
+      <!-- Step log (collapsible) -->
+      <div v-if="completedSteps > 0" class="step-log-wrap">
+        <button class="step-log-toggle" @click="stepLogExpanded = !stepLogExpanded">
+          <svg class="step-log-icon step-icon--done" width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="2,6 5,9 10,3"/>
+          </svg>
+          <span>生成完成</span>
+          <span class="step-log-detail">{{ completedSteps }}/{{ STEPS.length }} 步</span>
+          <svg class="step-log-chevron" :class="{ 'rotate-180': stepLogExpanded }" width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M4 6l4 4 4-4"/>
+          </svg>
+        </button>
+        <div v-if="stepLogExpanded" class="step-log-list">
+          <div
+            v-for="(s, i) in STEPS"
+            :key="s.key"
+            class="step-log-item"
+            :class="i < completedSteps ? 'step-log-done' : 'step-log-skip'"
+          >
+            <svg v-if="i < completedSteps" class="step-icon--done" width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="2,6 5,9 10,3"/>
+            </svg>
+            <span v-else class="step-dot" />
+            {{ s.label }}
+          </div>
+        </div>
       </div>
 
       <!-- Tabs -->
@@ -1106,4 +1151,47 @@ onMounted(async () => {
   animation: spin .7s linear infinite;
   display: inline-block;
 }
+
+/* ── Step log (collapsible, in results) ─────────────────────── */
+.step-log-wrap {
+  background: var(--card);
+  border: var(--card-bd);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.step-log-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 9px 12px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-family: var(--font);
+  font-size: 12px;
+  color: var(--text2);
+  text-align: left;
+}
+.step-log-toggle:hover { background: color-mix(in srgb, var(--primary) 4%, transparent); }
+.step-log-icon { flex-shrink: 0; }
+.step-log-detail { font-size: 11px; color: var(--text3); }
+.step-log-chevron { margin-left: auto; color: var(--text3); transition: transform .2s; flex-shrink: 0; }
+.rotate-180 { transform: rotate(180deg); }
+.step-log-list {
+  display: flex;
+  flex-direction: column;
+  border-top: var(--card-bd);
+}
+.step-log-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  font-size: 11px;
+  border-bottom: var(--card-bd);
+}
+.step-log-item:last-child { border-bottom: none; }
+.step-log-done { color: var(--text2); }
+.step-log-skip { color: var(--text3); opacity: .4; }
 </style>

@@ -2,11 +2,13 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
+import { useChatStore } from '@/stores/chat'
 import api from '@/api'
 
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
+const chatStore = useChatStore()
 
 const match = ref<any>(null)
 const prediction = ref<any>(null)
@@ -270,7 +272,7 @@ onMounted(load)
 
       <!-- Go to chat -->
       <div class="section px-4 pb-5">
-        <button class="btn btn-ghost w-full" @click="router.push(`/chat?match=${match.id}`)">
+        <button class="btn btn-ghost w-full" @click="chatStore.openWith(match.id)">
           继续追问
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M3 8h10M9 4l4 4-4 4"/>

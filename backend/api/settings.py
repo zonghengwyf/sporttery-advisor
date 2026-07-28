@@ -229,7 +229,7 @@ async def fetch_live_models(
         from openai import AsyncOpenAI
         defaults = PROVIDER_DEFAULTS.get(provider, {})
         base_url = cfg.base_url or defaults.get("base_url")
-        client = AsyncOpenAI(api_key=cfg.api_key, base_url=base_url)
+        client = AsyncOpenAI(api_key=cfg.api_key, base_url=base_url, timeout=10.0)
         resp = await client.models.list()
         ids = [m.id for m in resp.data]
         # 过滤掉 embedding / tts / image 等非对话模型
