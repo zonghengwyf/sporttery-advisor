@@ -184,8 +184,8 @@ Data-Dense Dashboard 风格，适配深色侧边栏 + 浅色内容区。
 本项目整合以下两个项目的规则与模型：
 
 - [china-sporttery-football-advisor](../china-sporttery-football-advisor/) — 竞彩决策规则 Skills（SKILL.md 等 5 个文件）
-- [football-prediction-skill](../china-sporttery-football-advisor/football-prediction-skill/) — Dixon-Coles 统计模型参考实现
-
+- [football-prediction-skill](../football-prediction-skill/) — Dixon-Coles 统计模型参考实现
+- [sports-skills](../sports-skills) — 竞彩决策规则 Skills 参考实现
 ## 免责声明
 
 本工具由 AI 基于统计概率和情报生成分析建议，不代表盈利承诺。购彩请量力而行，理性娱乐。

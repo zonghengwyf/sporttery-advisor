@@ -1,8 +1,9 @@
 import logging
+import math
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,6 +24,18 @@ class LegIn(BaseModel):
     pick: str        # "主胜" / "平局" / "客胜"
     pick_code: str   # "3" / "1" / "0"
     odds: float
+    market: str = "胜平负"        # "胜平负" | "让球胜平负"
+    handicap: float | None = None  # 让球数，正=主让，负=受让；仅 HHAD 市场有效
+
+    @field_validator("handicap")
+    @classmethod
+    def handicap_must_be_integer(cls, v: float | None) -> float | None:
+        if v is not None:
+            if not math.isfinite(v):
+                raise ValueError("让球数必须为有限数值")
+            if v != int(v):
+                raise ValueError("竞彩让球数必须为整数（如 1.0、-1.0），不支持半球让球")
+        return v
 
 
 class CreateBetRequest(BaseModel):
@@ -42,6 +55,25 @@ class UpdateBetRequest(BaseModel):
 
 # ── 辅助 ──────────────────────────────────────────────────────────────────────
 
+def _hhad_result_from_score(actual_score: str | None, handicap: float) -> str | None:
+    """从比分和让球数计算 HHAD 结果（H/D/A）。无比分时返回 None。"""
+    if not actual_score:
+        return None
+    try:
+        home_g, away_g = (int(x) for x in actual_score.split("-"))
+    except Exception:
+        return None
+    # handicap < 0: home gives |h| balls; handicap > 0: home receives h balls
+    # effective home score = home_g + h; compare vs away_g
+    h = int(round(handicap))
+    adjusted = (home_g - away_g) + h
+    if adjusted > 0:
+        return "H"
+    if adjusted == 0:
+        return "D"
+    return "A"
+
+
 async def _enrich_record(record: BetRecord, db: AsyncSession) -> dict:
     """将 BetRecord ORM 对象序列化为前端所需格式，补充赛事状态。"""
     legs_out = []
@@ -49,7 +81,12 @@ async def _enrich_record(record: BetRecord, db: AsyncSession) -> dict:
     for leg in record.legs:
         mid = leg.get("match_id")
         match: Match | None = await db.get(Match, mid) if mid else None
-        actual = match.actual_result if match else None
+        # HHAD 让球盘：必须从实际比分推算让球结算结果，不能用原始 H/D/A
+        # 若比分暂未记录，保持 None 使注单留在 pending 状态，等待比分录入后再结算
+        if match and leg.get("market") == "让球胜平负" and leg.get("handicap") is not None:
+            actual = _hhad_result_from_score(match.actual_score, leg["handicap"])
+        else:
+            actual = match.actual_result if match else None
         all_results.append(actual)
         legs_out.append({
             **leg,
@@ -175,9 +212,10 @@ async def get_summary(
     total_payout = sum((r.payout or 0) for r in records if r.status == "won")
     won_count = sum(1 for r in settled if r.status == "won")
 
-    roi = round((total_payout - total_stake) / total_stake * 100, 1) if total_stake > 0 else 0.0
+    settled_stake = sum(r.stake for r in settled)
+    roi = round((total_payout - settled_stake) / settled_stake * 100, 1) if settled_stake > 0 else 0.0
     hit_rate = round(won_count / len(settled) * 100, 1) if settled else 0.0
-    profit = round(total_payout - total_stake, 2)
+    profit = round(total_payout - settled_stake, 2)
 
     return {
         "total_stake":   round(total_stake, 2),

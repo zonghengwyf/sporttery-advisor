@@ -7,13 +7,16 @@ const router = useRouter()
 const route = useRoute()
 const auth = useAuthStore()
 
+// 导航项（移动端与 PC 完全一致，5 项）
 const nav = [
   { path: '/analysis', label: '赛事' },
-  { path: '/backtest', label: '回测' },
   { path: '/tickets',  label: '方案', featured: true },
   { path: '/records',  label: '战绩' },
+  { path: '/backtest', label: '回测' },
   { path: '/settings', label: '设置' },
 ]
+
+const mobileNav = nav
 
 function isActive(path: string) {
   return route.path === path || route.path.startsWith(path + '/')
@@ -60,7 +63,7 @@ function isActive(path: string) {
   <!-- Mobile bottom nav (hidden on PC) -->
   <nav class="bottom-nav" aria-label="移动端导航">
     <button
-      v-for="item in nav"
+      v-for="item in mobileNav"
       :key="item.path"
       type="button"
       class="bn-item"
@@ -74,11 +77,12 @@ function isActive(path: string) {
       <svg v-else-if="item.path === '/tickets'" width="22" height="22" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <rect x="3" y="3" width="14" height="14" rx="2"/><path d="M7 10h6M7 7h6M7 13h4"/>
       </svg>
-      <svg v-else-if="item.path === '/backtest'" width="22" height="22" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M3 14l4-5 4 3 4-6"/><path d="M3 17h14"/>
-      </svg>
       <svg v-else-if="item.path === '/records'" width="22" height="22" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M6 3h8M7 3v4a3 3 0 0 0 6 0V3M5 4H3a2 2 0 0 0 0 4h2M15 4h2a2 2 0 0 0 0 4h-2M10 10v7M7 17h6"/>
+      </svg>
+      <svg v-else-if="item.path === '/backtest'" width="22" height="22" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <polyline points="2,15 6,9 10,12 14,5 18,7"/>
+        <path d="M2 17h16"/>
       </svg>
       <svg v-else-if="item.path === '/settings'" width="22" height="22" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <circle cx="10" cy="10" r="2.5"/>

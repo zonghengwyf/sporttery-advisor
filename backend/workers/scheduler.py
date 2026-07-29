@@ -9,8 +9,12 @@ import logging
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from config import settings
-from workers.tasks import run_daily_analysis, run_daily_briefing, sync_match_results
+from config import get_settings
+settings = get_settings()
+from workers.tasks import (
+    run_daily_analysis, run_daily_briefing,
+    sync_match_results, run_auto_ticket, sync_auto_ticket_results,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -46,6 +50,28 @@ async def main():
         replace_existing=True,
         misfire_grace_time=1800,
     )
+
+    if settings.auto_ticket_enabled:
+        scheduler.add_job(
+            run_auto_ticket,
+            CronTrigger.from_crontab(settings.auto_ticket_cron),
+            id="auto_ticket",
+            name="自动出票",
+            replace_existing=True,
+            misfire_grace_time=3600,
+        )
+        scheduler.add_job(
+            sync_auto_ticket_results,
+            CronTrigger.from_crontab(settings.auto_ticket_sync_cron),
+            id="auto_ticket_sync",
+            name="自动出票赛果同步",
+            replace_existing=True,
+            misfire_grace_time=3600,
+        )
+        logger.info(
+            "自动出票已启用 | 出票：%s | 同步：%s",
+            settings.auto_ticket_cron, settings.auto_ticket_sync_cron,
+        )
 
     scheduler.start()
     logger.info("调度器启动 | 分析流水线：%s", settings.daily_analyze_cron)

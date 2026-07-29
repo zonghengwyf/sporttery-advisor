@@ -259,6 +259,252 @@ async def _settle_bet_records(session, match, actual_result: str):
             logger.info("BetRecord id=%d 结算完成 → %s", record.id, record.status)
 
 
+async def run_auto_ticket(
+    user_id: int | None = None,
+    trigger: str = "scheduled",
+    db=None,
+) -> int:
+    """
+    自动出票：复用当日已有 Prediction，调用票型生成，写入 AutoTicketRun。
+    返回新记录的 id。
+    """
+    from datetime import date as _date
+    from sqlalchemy import select as sa_select
+    from db.models import AutoTicketRun, LLMConfig, Match, Prediction
+    from db.session import AsyncSessionLocal
+    from config import get_settings
+
+    settings = get_settings()
+    today = _date.today()
+
+    _own_db = db is None
+    if _own_db:
+        _db_ctx = AsyncSessionLocal()
+        session = await _db_ctx.__aenter__()
+    else:
+        session = db
+
+    try:
+        # 查当日已分析的赛事
+        matches_result = await session.execute(
+            sa_select(Match).where(Match.sale_date == str(today))
+        )
+        matches = matches_result.scalars().all()
+        match_ids = [m.id for m in matches]
+
+        if not match_ids:
+            logger.warning("auto_ticket: 今日无赛事，跳过出票")
+            skip_run = AutoTicketRun(
+                user_id=user_id or 0, run_date=today, trigger=trigger,
+                model_info={}, match_ids=[], tickets_json={}, stake=0,
+                sync_status="skipped", sync_error="今日无赛事",
+            )
+            session.add(skip_run)
+            await session.commit()
+            await session.refresh(skip_run)
+            return skip_run.id
+
+        # 收集 Prediction（最新一条/场）
+        preds_result = await session.execute(
+            sa_select(Prediction)
+            .where(Prediction.match_id.in_(match_ids))
+            .order_by(Prediction.created_at.desc())
+        )
+        all_preds = preds_result.scalars().all()
+        # 每场取最新
+        seen: set[int] = set()
+        preds: list[Prediction] = []
+        for p in all_preds:
+            if p.match_id not in seen:
+                seen.add(p.match_id)
+                preds.append(p)
+
+        if not preds:
+            logger.warning("auto_ticket: 今日无可用 Prediction，跳过")
+            skip_run = AutoTicketRun(
+                user_id=user_id or 0, run_date=today, trigger=trigger,
+                model_info={}, match_ids=match_ids, tickets_json={}, stake=0,
+                sync_status="skipped", sync_error="今日无可用预测",
+            )
+            session.add(skip_run)
+            await session.commit()
+            await session.refresh(skip_run)
+            return skip_run.id
+
+        # 收集 model_info（查用户 LLM 配置）
+        _uid = user_id or 0
+        llm_result = await session.execute(
+            sa_select(LLMConfig).where(
+                LLMConfig.user_id == _uid,
+                LLMConfig.is_default == True,  # noqa: E712
+            )
+        )
+        default_llms = llm_result.scalars().all()
+        if not default_llms:
+            llm_result2 = await session.execute(
+                sa_select(LLMConfig).where(LLMConfig.user_id == _uid)
+            )
+            default_llms = llm_result2.scalars().all()
+
+        llm_names = [f"{c.provider}/{c.model}" for c in default_llms]
+        analysis_type = "ensemble" if len(llm_names) > 1 else "single"
+
+        # 用最新 Prediction 的 fused_probs 调用票型生成器
+        from core.tickets.generator import TicketGenerator
+        generator = TicketGenerator()
+        all_match_data = []
+        for pred in preds:
+            match = next((m for m in matches if m.id == pred.match_id), None)
+            if not match or not pred.fused_probs:
+                continue
+            ensemble_votes = (pred.tickets or {}).get("ensemble_votes", [])
+            all_match_data.append({
+                "match": match,
+                "prediction": pred,
+                "ensemble_votes": ensemble_votes,
+            })
+
+        if not all_match_data:
+            logger.warning("auto_ticket: 无有效 fused_probs，跳过")
+            skip_run = AutoTicketRun(
+                user_id=_uid, run_date=today, trigger=trigger,
+                model_info={}, match_ids=match_ids, tickets_json={}, stake=0,
+                sync_status="skipped", sync_error="无有效概率数据",
+            )
+            session.add(skip_run)
+            await session.commit()
+            await session.refresh(skip_run)
+            return skip_run.id
+
+        tickets_json = _build_auto_tickets(generator, all_match_data, budget=settings.auto_ticket_stake)
+
+        # Pre-embed team names in leg dicts for historical display (avoids N+1 at read time)
+        _match_map = {m.id: m for m in matches}
+        for _scheme in tickets_json.get("schemes", []):
+            for _leg in _scheme.get("legs", []):
+                _mid = _leg.get("match_id")
+                if _mid and _mid in _match_map:
+                    _leg["home_team"] = _match_map[_mid].home_team
+                    _leg["away_team"] = _match_map[_mid].away_team
+                    _leg["league"] = _match_map[_mid].league
+
+        # 写入 AutoTicketRun
+        run = AutoTicketRun(
+            user_id=_uid,
+            run_date=today,
+            trigger=trigger,
+            model_info={
+                "llms": llm_names,
+                "type": analysis_type,
+            },
+            match_ids=[d["match"].id for d in all_match_data],
+            tickets_json=tickets_json,
+            stake=settings.auto_ticket_stake,
+            sync_status="pending",
+        )
+        session.add(run)
+        await session.commit()
+        await session.refresh(run)
+        logger.info("auto_ticket 完成：run_id=%d trigger=%s 场次=%d", run.id, trigger, len(all_match_data))
+        return run.id
+
+    except Exception as exc:
+        logger.error("auto_ticket 失败：%s", exc, exc_info=True)
+        if _own_db:
+            await session.rollback()
+        raise
+    finally:
+        if _own_db:
+            await _db_ctx.__aexit__(None, None, None)
+
+
+def _build_auto_tickets(generator, all_match_data: list, budget: float) -> dict:
+    """把多场 Prediction 数据合并为票型 JSON（复用 TicketGenerator）。"""
+    plans = generator.generate_parlay_plans(all_match_data, budget=budget)
+    return {
+        "schemes": [p.to_dict() for p in plans],
+        "match_count": len(all_match_data),
+    }
+
+
+async def _sync_one_auto_ticket_run(run, session) -> None:
+    """同步一条 AutoTicketRun 的赛果，更新 sync_status 和 results_json。"""
+    from sqlalchemy import select as sa_select
+    from db.models import Match
+    from datetime import datetime as _dt
+
+    if not run.match_ids:
+        run.sync_status = "failed"
+        run.sync_error = "match_ids 为空"
+        return
+
+    results: dict = {}
+    errors: list[str] = []
+    synced_count = 0
+
+    for mid in run.match_ids:
+        match = await session.get(Match, mid)
+        if not match:
+            errors.append(f"match#{mid}: not_found")
+            continue
+        if match.actual_result is None:
+            from datetime import datetime as _dt2, timezone
+            now_utc = _dt2.utcnow()
+            if match.kickoff_at and match.kickoff_at < now_utc:
+                errors.append(f"match#{mid}: score_missing")
+            else:
+                errors.append(f"match#{mid}: no_result_yet")
+            continue
+
+        results[str(mid)] = {
+            "actual": match.actual_result,
+            "score":  match.actual_score,
+        }
+        synced_count += 1
+
+    total = len(run.match_ids)
+    if synced_count == total:
+        run.sync_status = "synced"
+        run.sync_error = None
+    elif synced_count > 0:
+        run.sync_status = "partial"
+        run.sync_error = "; ".join(errors)
+    else:
+        run.sync_status = "failed"
+        run.sync_error = "; ".join(errors) or "all_missing"
+
+    run.results_json = results
+    run.synced_at = _dt.utcnow()
+    logger.info("auto_ticket sync run#%d: %d/%d 场同步", run.id, synced_count, total)
+
+
+async def sync_auto_ticket_results():
+    """凌晨批量同步 pending/partial 的 AutoTicketRun 赛果。"""
+    from sqlalchemy import select as sa_select, or_
+    from db.models import AutoTicketRun
+    from db.session import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as session:
+        stmt = sa_select(AutoTicketRun).where(
+            or_(
+                AutoTicketRun.sync_status == "pending",
+                AutoTicketRun.sync_status == "partial",
+            )
+        )
+        result = await session.execute(stmt)
+        runs = result.scalars().all()
+
+        logger.info("sync_auto_ticket_results: 待同步 %d 条", len(runs))
+        for run in runs:
+            try:
+                await _sync_one_auto_ticket_run(run, session)
+            except Exception as exc:
+                logger.error("sync auto_ticket run#%d 失败：%s", run.id, exc)
+
+        await session.commit()
+        logger.info("sync_auto_ticket_results 完成")
+
+
 async def retrain_model(seasons: int = 3):
     """从 football-data.co.uk 下载历史数据并重新拟合 Dixon-Coles 模型。"""
     logger.info("开始重新训练模型，使用过去 %d 个赛季数据", seasons)

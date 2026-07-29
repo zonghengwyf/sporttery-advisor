@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, watch, onMounted } from 'vue'
 import api from '@/api'
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -41,7 +41,7 @@ interface EnsembleConfig {
 }
 
 // ── State ──────────────────────────────────────────────────────────────────
-const activeTab = ref<'llm' | 'ds' | 'webhook' | 'ensemble'>('llm')
+const activeTab = ref<'llm' | 'ds' | 'webhook' | 'ensemble' | 'auto_ticket'>('llm')
 const llmConfigs = ref<LLMConfig[]>([])
 const dsConfigs = ref<DSConfig[]>([])
 const webhook = ref<WebhookConfig>({ url: '', webhook_type: 'generic', enabled: true })
@@ -49,6 +49,19 @@ const ensemble = ref<EnsembleConfig>({
   models: 'all', strategy: 'majority',
   min_consensus: 0.5, min_confidence: 40,
   default_multiplier: 2, budget: 100,
+})
+
+interface AutoTicketConfig {
+  enabled: boolean
+  cron: string
+  stake: number
+  sync_cron: string
+}
+const autoTicket = ref<AutoTicketConfig>({
+  enabled: false,
+  cron: '30 9 * * *',
+  stake: 10,
+  sync_cron: '0 2 * * *',
 })
 const loading = ref(true)
 const saving = ref(false)
@@ -138,11 +151,12 @@ const WEBHOOK_TYPES = [
 async function load() {
   loading.value = true
   try {
-    const [llmRes, dsRes, whRes, ensRes] = await Promise.all([
+    const [llmRes, dsRes, whRes, ensRes, atRes] = await Promise.all([
       api.get('/settings/llm'),
       api.get('/settings/datasource'),
       api.get('/settings/webhook').catch(() => ({ data: null })),
       api.get('/settings/ensemble').catch(() => ({ data: null })),
+      api.get('/settings/auto-ticket').catch(() => ({ data: null })),
     ])
     llmConfigs.value = llmRes.data
 
@@ -159,6 +173,7 @@ async function load() {
 
     if (whRes.data) webhook.value = whRes.data
     if (ensRes.data) ensemble.value = { ...ensemble.value, ...ensRes.data }
+    if (atRes.data) autoTicket.value = { ...autoTicket.value, ...atRes.data }
 
     // 并发预加载所有 provider 的模型列表
     PROVIDERS.forEach(p => loadProviderModels(p))
@@ -310,6 +325,39 @@ async function testWebhook() {
   }
 }
 
+// ── Auto Ticket ───────────────────────────────────────────────────────────────
+function cronToTime(cron: string): string {
+  const parts = cron.trim().split(/\s+/)
+  if (parts.length < 2) return '09:30'
+  const h = parseInt(parts[1]) || 0
+  const m = parseInt(parts[0]) || 0
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`
+}
+function timeToCron(time: string): string {
+  const [hStr, mStr] = time.split(':')
+  return `${parseInt(mStr) || 0} ${parseInt(hStr) || 0} * * *`
+}
+const ticketTime = ref(cronToTime(autoTicket.value.cron))
+const syncTime   = ref(cronToTime(autoTicket.value.sync_cron))
+watch(autoTicket, (v) => {
+  ticketTime.value = cronToTime(v.cron)
+  syncTime.value   = cronToTime(v.sync_cron)
+}, { deep: true, once: true })
+
+async function saveAutoTicket() {
+  autoTicket.value.cron = timeToCron(ticketTime.value)
+  autoTicket.value.sync_cron = timeToCron(syncTime.value)
+  saving.value = true
+  try {
+    await api.put('/settings/auto-ticket', autoTicket.value)
+    showToast('自动出票配置已保存')
+  } catch {
+    showToast('保存失败', 'err')
+  } finally {
+    saving.value = false
+  }
+}
+
 // ── Ensemble ─────────────────────────────────────────────────────────────────
 async function saveEnsemble() {
   saving.value = true
@@ -348,7 +396,8 @@ onMounted(load)
           { key: 'llm',     label: 'LLM 模型' },
           { key: 'ds',      label: '数据源' },
           { key: 'webhook', label: '通知推送' },
-          { key: 'ensemble',label: '集成分析' },
+          { key: 'ensemble',   label: '集成分析' },
+          { key: 'auto_ticket', label: '自动出票' },
         ]"
         :key="tab.key"
         class="s-tab"
@@ -736,6 +785,63 @@ onMounted(load)
         </div>
       </template>
 
+      <!-- ══ 自动出票 ════════════════════════════════════════════════════════ -->
+      <template v-if="activeTab === 'auto_ticket'">
+        <div class="s-card s-card--form">
+          <div class="s-section-head">
+            <span class="section-label" style="margin:0">自动出票配置</span>
+          </div>
+          <div class="s-form-body">
+
+            <!-- 开关 -->
+            <div class="s-row">
+              <label class="s-label">
+                启用自动出票
+                <span class="s-hint">系统每日定时自动生成投注方案，在战绩页查看历史</span>
+              </label>
+              <label class="s-toggle">
+                <input type="checkbox" v-model="autoTicket.enabled" />
+                <span class="s-toggle-track" />
+              </label>
+            </div>
+
+            <!-- 出票时间 -->
+            <div class="s-row">
+              <label class="s-label">
+                每日出票时间
+                <span class="s-hint">建议在 AI 分析完成（09:00）后，如 09:30</span>
+              </label>
+              <input class="input input--time" type="time" v-model="ticketTime" />
+            </div>
+
+            <!-- 参考金额 -->
+            <div class="s-row">
+              <label class="s-label">
+                参考投注额（¥）
+                <span class="s-hint">每份方案的模拟金额，用于战绩页盈亏计算，不实际扣款</span>
+              </label>
+              <input class="input" type="number" v-model.number="autoTicket.stake" min="1" step="5" style="max-width:100px" />
+            </div>
+
+            <!-- 赛果同步时间 -->
+            <div class="s-row">
+              <label class="s-label">
+                赛果同步时间
+                <span class="s-hint">凌晨批量同步前日赛果，建议 02:00（比赛结束后）</span>
+              </label>
+              <input class="input input--time" type="time" v-model="syncTime" />
+            </div>
+
+            <div class="s-hint-block">
+              修改时间配置后需重启后端 worker 服务生效。也可在「战绩」页点击「立即出票」手动触发。
+            </div>
+          </div>
+          <div class="s-form-foot">
+            <button class="btn btn-primary btn-sm" :disabled="saving" @click="saveAutoTicket" style="margin-left:auto">保存配置</button>
+          </div>
+        </div>
+      </template>
+
     </div>
   </div>
 </template>
@@ -743,6 +849,8 @@ onMounted(load)
 <style scoped>
 /* ── Layout ──────────────────────────────────────────────────────────────── */
 .view { display: flex; flex-direction: column; height: 100%; }
+.input--time { max-width: 130px; }
+.s-hint-block { font-size: 11px; color: var(--text3); line-height: 1.5; padding: 8px 12px; background: color-mix(in srgb, var(--primary) 4%, var(--card)); border-radius: 6px; }
 
 
 /* ── Tabs ────────────────────────────────────────────────────────────────── */

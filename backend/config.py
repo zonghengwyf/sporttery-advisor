@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     # ── 每日调度（5 字段标准 Cron，本地时间） ────────────────────────────────
     daily_sync_cron: str = "0 8 * * *"
     daily_analyze_cron: str = "0 9 * * *"
+    auto_ticket_enabled: bool = False
+    auto_ticket_cron: str = "30 9 * * *"   # 默认 09:30，分析完成后出票
+    auto_ticket_stake: float = 10.0         # 参考投注额（仅用于盈亏计算）
+    auto_ticket_sync_cron: str = "0 2 * * *"  # 凌晨 02:00 批量同步前日赛果
 
     # ── 数据源 API Key（留空使用免费源降级） ─────────────────────────────────
     # 竞彩赛单直接使用官方 App 内部接口，无需 Key

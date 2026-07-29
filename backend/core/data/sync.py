@@ -60,6 +60,7 @@ async def sync_daily_matches(session: AsyncSession, target_date: date) -> int:
                 sale_date=row["sale_date"],
                 available_markets=available,
                 sporttery_odds=stored_odds,
+                sporttery_odds_open=stored_odds,  # 首次写入即为开盘赔率
                 overseas_odds=None,
                 is_tournament=False,
             )
@@ -68,6 +69,9 @@ async def sync_daily_matches(session: AsyncSession, target_date: date) -> int:
             match.sporttery_odds = stored_odds
             match.available_markets = available
             match.match_no = row.get("match_no") or match.match_no
+            # sporttery_odds_open 只在首次创建时设置，后续不覆盖
+            if match.sporttery_odds_open is None and stored_odds:
+                match.sporttery_odds_open = stored_odds
             match.updated_at = datetime.utcnow()
 
         upserted += 1

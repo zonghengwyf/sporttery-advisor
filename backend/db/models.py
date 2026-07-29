@@ -1,8 +1,8 @@
 import enum
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import (
-    Boolean, DateTime, Enum, Float, ForeignKey,
+    Boolean, Date, DateTime, Enum, Float, ForeignKey,
     Integer, JSON, String, Text, UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -125,6 +125,26 @@ class ChatSession(Base):
     messages: Mapped[list] = mapped_column(JSON, default=list)  # [{role, content, ts}]
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class AutoTicketRun(Base):
+    """系统每日自动出票记录（调度器触发或手动触发）"""
+    __tablename__ = "auto_ticket_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    run_date: Mapped[date] = mapped_column(Date, nullable=False)
+    trigger: Mapped[str] = mapped_column(String(20), default="scheduled")  # scheduled / manual
+    # {llms: ["claude-sonnet-4-6", "deepseek-v3"], type: "ensemble"|"single", consensus_ratio: 0.8}
+    model_info: Mapped[dict | None] = mapped_column(JSON)
+    match_ids: Mapped[list | None] = mapped_column(JSON)          # 本次出票覆盖的 match_id 列表
+    tickets_json: Mapped[dict | None] = mapped_column(JSON)       # 完整票型 JSON
+    stake: Mapped[float] = mapped_column(Float, default=10.0)     # 参考投注额（用于盈亏计算）
+    sync_status: Mapped[str] = mapped_column(String(20), default="pending")  # pending/synced/failed/partial
+    sync_error: Mapped[str | None] = mapped_column(Text)          # 失败原因（JSON 或纯文本）
+    results_json: Mapped[dict | None] = mapped_column(JSON)       # {match_id: {actual, score, won}}
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    synced_at: Mapped[datetime | None] = mapped_column(DateTime)
 
 
 class BetRecord(Base):

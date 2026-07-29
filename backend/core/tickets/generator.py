@@ -58,19 +58,22 @@ class ParlayLeg:
     pick: str                # "主胜" / "平局" / "客胜"
     pick_code: str           # "3" / "1" / "0"
     odds: float              # 竞彩赔率
-    win_prob: float          # 模型预测该结果的概率
+    win_prob: float          # 模型预测该结果的概率（已针对所选市场调整）
     model_votes_agree: int   # 同意此投注的模型数
     model_votes_total: int   # 参与投票的模型数
     model_names: list[str] = field(default_factory=list)
-    odds_estimated: bool = False  # 官方赔率未发布时用模型推算
+    odds_estimated: bool = False   # 官方赔率未发布时用模型推算
+    market: str = "胜平负"          # "胜平负" | "让球胜平负"
+    handicap: float | None = None  # 让球数，正=主让，负=受让，None=不适用
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "match_id": self.match_id,
             "match_code": self.match_code,
             "home_team": self.home_team,
             "away_team": self.away_team,
             "kickoff": self.kickoff,
+            "market": self.market,
             "pick": self.pick,
             "pick_code": self.pick_code,
             "odds": self.odds,
@@ -82,6 +85,11 @@ class ParlayLeg:
                 "models": self.model_names,
             },
         }
+        if self.handicap is not None:
+            from core.tickets.hhad import format_handicap
+            d["handicap"] = self.handicap
+            d["handicap_label"] = format_handicap(self.handicap)
+        return d
 
 
 @dataclass
@@ -307,20 +315,22 @@ class TicketGenerator:
                 if not pick_str:
                     return None
 
-                # 找到对应的概率和赔率
+                # 找到对应的概率和赔率，比较 HAD vs HHAD EV 选最优市场
                 primary_pick = _primary_pick(pick_str)  # "主胜" / "平局" / "客胜"
-                win_prob = _prob_for_pick(fp, primary_pick)
-                odds_val = _odds_for_pick(match.sporttery_odds, primary_pick)
+                market_name, odds_val, handicap_val, win_prob, odds_estimated = _select_market(
+                    match, primary_pick, fp
+                )
 
-                # 官方赔率未发布时用模型概率推算隐含赔率（含 ~12.5% 水差）
-                odds_estimated = False
-                if odds_val is None or odds_val < 1.01:
-                    raw_p = max(win_prob, 0.05)
-                    odds_val = round(min(1.0 / (raw_p * 1.125), 19.9), 2)
-                    odds_estimated = True
+                if odds_estimated:
                     logger.info(
                         "match_id=%s 使用推算赔率：pick=%s prob=%.3f → odds=%.2f",
-                        mid, primary_pick, raw_p, odds_val,
+                        mid, primary_pick, win_prob, odds_val,
+                    )
+                elif market_name == "让球胜平负":
+                    from core.tickets.hhad import format_handicap
+                    logger.info(
+                        "match_id=%s 选择让球盘 [%s]：pick=%s odds=%.2f EV优于胜平负",
+                        mid, format_handicap(handicap_val or 0), primary_pick, odds_val,
                     )
 
                 # 计算 AI 共识
@@ -339,11 +349,13 @@ class TicketGenerator:
                     home_team=match.home_team,
                     away_team=match.away_team,
                     kickoff=kickoff_str,
+                    market=market_name,
+                    handicap=handicap_val,
                     pick=primary_pick,
                     pick_code=_PICK_CODE.get(primary_pick, "-"),
                     odds=round(float(odds_val), 2),
                     odds_estimated=odds_estimated,
-                    win_prob=win_prob,
+                    win_prob=round(win_prob, 4),
                     model_votes_agree=agree_count,
                     model_votes_total=total_count,
                     model_names=model_names,
@@ -495,9 +507,79 @@ def _odds_for_pick(odds: dict | None, pick: str) -> float | None:
     if val is None:
         return None
     try:
-        return float(val)
+        f = float(val)
+        return f if f > 1.0 else None
     except (TypeError, ValueError):
         return None
+
+
+def _hhad_odds_for_pick(hhad_data: dict, pick: str) -> float | None:
+    """从 HHAD 赔率字典取对应方向的赔率。"""
+    mapping = {"主胜": "home", "平局": "draw", "客胜": "away"}
+    val = hhad_data.get(mapping.get(pick, "home"))
+    if val is None:
+        return None
+    try:
+        f = float(val)
+        return f if f > 1.0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _select_market(
+    match,
+    primary_pick: str,
+    model_fp: dict,
+) -> tuple[str, float, float | None, float, bool]:
+    """
+    比较胜平负（HAD）与让球胜平负（HHAD）的期望值，选择更优的投注市场。
+
+    返回: (market_label, odds, handicap, win_prob_for_market, is_estimated)
+    """
+    from core.tickets.hhad import had_to_hhad
+
+    pick_idx = {"主胜": 0, "平局": 1, "客胜": 2}
+    idx = pick_idx.get(primary_pick, 0)
+
+    ph = model_fp.get("home", 0.33)
+    pd = model_fp.get("draw", 0.28)
+    pa = model_fp.get("away", 0.39)
+    had_prob = (ph, pd, pa)[idx]
+
+    # ── HAD ─────────────────────────────────────────────────────────────────
+    had_odds = _odds_for_pick(match.sporttery_odds, primary_pick)
+    had_ev = had_prob * had_odds - 1 if had_odds else -2.0
+
+    # ── HHAD ────────────────────────────────────────────────────────────────
+    hhad_data = (match.sporttery_odds or {}).get("hhad") or {}
+    best_hhad: dict = {}   # {ev, odds, handicap, prob}
+
+    if hhad_data and isinstance(hhad_data, dict):
+        handicap = hhad_data.get("handicap", 0)
+        hhad_odds_val = _hhad_odds_for_pick(hhad_data, primary_pick)
+        if hhad_odds_val:
+            hhad_probs = had_to_hhad(ph, pd, pa, handicap)
+            hhad_p = hhad_probs[idx]
+            ev = hhad_p * hhad_odds_val - 1
+            best_hhad = {"ev": ev, "odds": hhad_odds_val, "handicap": handicap, "prob": hhad_p}
+
+    # ── 选优 ─────────────────────────────────────────────────────────────────
+    if best_hhad and best_hhad["ev"] > had_ev:
+        return (
+            "让球胜平负",
+            best_hhad["odds"],
+            best_hhad["handicap"],
+            best_hhad["prob"],
+            False,
+        )
+
+    if had_odds:
+        return "胜平负", had_odds, None, had_prob, False
+
+    # 赔率未发布，用模型概率推算
+    raw_p = max(had_prob, 0.05)
+    est_odds = round(min(1.0 / (raw_p * 1.125), 19.9), 2)
+    return "胜平负", est_odds, None, had_prob, True
 
 
 def _compute_votes(votes: list[dict], pick: str) -> tuple[int, int, list[str]]:

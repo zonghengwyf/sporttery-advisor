@@ -110,7 +110,7 @@ function pickLabel(pick: string) {
 }
 
 // ── Generate via SSE ─────────────────────────────────────────
-async function generate(matchIds: number[]) {
+async function generate(matchIds: number[], force = false) {
   if (!matchIds.length || generating.value) return
   lastMatchIds.value = matchIds
   generating.value = true
@@ -132,7 +132,7 @@ async function generate(matchIds: number[]) {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${token}`,
       },
-      body: JSON.stringify({ match_ids: matchIds }),
+      body: JSON.stringify({ match_ids: matchIds, force }),
       signal: AbortSignal.timeout(600_000),
     })
 
@@ -436,7 +436,7 @@ onMounted(async () => {
             </svg>
             <span>日志</span>
           </button>
-          <button class="reselect-btn" @click="resetSchemes">
+          <button class="reselect-btn" @click="generate(lastMatchIds, true)">
             <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
               <path d="M14 8A6 6 0 0 1 2.5 12M2 8a6 6 0 0 1 11.5-4M2 4v4h4M14 12v-4h-4"/>
             </svg>
@@ -931,10 +931,14 @@ onMounted(async () => {
 .tab-label { font-size: 12px; font-weight: 700; color: var(--text2); }
 .tab-risk { font-size: 9px; color: var(--text3); }
 .tab-count { font-family: var(--font-disp); font-size: 10px; color: var(--text3); }
-.scheme-tab.tab-on { background: var(--primary); border-color: var(--primary); }
-.scheme-tab.tab-on .tab-label { color: #fff; }
-.scheme-tab.tab-on .tab-risk { color: rgba(255,255,255,.7); }
-.scheme-tab.tab-on .tab-count { color: rgba(255,255,255,.7); }
+.scheme-tab.tab-on {
+  background: color-mix(in srgb, var(--primary) 10%, var(--card));
+  border-color: var(--primary);
+  border-bottom: 2px solid var(--primary);
+}
+.scheme-tab.tab-on .tab-label { color: var(--primary); font-weight: 800; }
+.scheme-tab.tab-on .tab-risk  { color: color-mix(in srgb, var(--primary) 80%, var(--text3)); }
+.scheme-tab.tab-on .tab-count { color: color-mix(in srgb, var(--primary) 80%, var(--text3)); }
 .scheme-tab.tab-disabled { opacity: .35; cursor: not-allowed; }
 
 /* Scheme card */

@@ -74,8 +74,8 @@ const hhad = computed(() => match.value?.sporttery_odds?.hhad ?? null)
 const handicapLabel = computed(() => {
   const h = hhad.value?.handicap
   if (h == null) return '让球'
-  if (h > 0) return `主让${h}球`
-  if (h < 0) return `客让${Math.abs(h)}球`
+  if (h < 0) return `主让${Math.abs(h)}球`
+  if (h > 0) return `客让${h}球`
   return '让平球'
 })
 

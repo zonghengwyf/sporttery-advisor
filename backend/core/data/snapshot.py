@@ -190,19 +190,21 @@ class SnapshotManager:
 
     async def get_backtest_metrics(self, days: int = 30, user_id: int = 0) -> dict | None:
         db_path = self.db_path
+        from datetime import timedelta
+        cutoff = datetime.utcnow() - timedelta(days=int(days))
 
         def _compute():
             import duckdb
             con = duckdb.connect(db_path, read_only=True)
             try:
                 rows = con.execute(
-                    f"""
+                    """
                     SELECT p_home, p_draw, p_away, actual
                     FROM backtest_results
                     WHERE user_id = ?
-                      AND recorded_at >= CURRENT_TIMESTAMP - INTERVAL '{int(days)}' DAY
+                      AND recorded_at >= ?
                     """,
-                    [user_id],
+                    [user_id, cutoff],
                 ).fetchall()
                 if not rows:
                     return None
@@ -214,21 +216,23 @@ class SnapshotManager:
 
     async def get_chart_data(self, days: int = 30, user_id: int = 0) -> dict:
         db_path = self.db_path
+        from datetime import timedelta
+        cutoff = datetime.utcnow() - timedelta(days=int(days))
 
         def _compute():
             import duckdb
             con = duckdb.connect(db_path, read_only=True)
             try:
                 rows = con.execute(
-                    f"""
+                    """
                     SELECT date_trunc('day', recorded_at) AS day,
                            p_home, p_draw, p_away, actual
                     FROM backtest_results
                     WHERE user_id = ?
-                      AND recorded_at >= CURRENT_TIMESTAMP - INTERVAL '{int(days)}' DAY
+                      AND recorded_at >= ?
                     ORDER BY day
                     """,
-                    [user_id],
+                    [user_id, cutoff],
                 ).fetchall()
             finally:
                 con.close()
@@ -260,15 +264,16 @@ class SnapshotManager:
             con = duckdb.connect(db_path, read_only=True)
             try:
                 rows = con.execute(
-                    f"""
+                    """
                     SELECT home_odds, draw_odds, away_odds, actual
                     FROM backtest_results
                     WHERE home_odds IS NOT NULL
                       AND draw_odds IS NOT NULL
                       AND away_odds IS NOT NULL
                     ORDER BY recorded_at DESC
-                    LIMIT {int(limit)}
-                    """
+                    LIMIT ?
+                    """,
+                    [int(limit)],
                 ).fetchall()
             finally:
                 con.close()

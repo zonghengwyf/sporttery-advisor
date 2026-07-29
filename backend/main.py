@@ -9,7 +9,7 @@ logging.basicConfig(
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api import auth, backtest, bets, chat, daily, matches, predictions, public, settings, tickets
+from api import auth, backtest, bets, chat, daily, matches, predictions, public, settings, tickets, track
 from db.session import init_db
 
 logger = logging.getLogger(__name__)
@@ -46,6 +46,7 @@ app.include_router(backtest.router,    prefix="/api/backtest",    tags=["backtes
 app.include_router(settings.router,    prefix="/api/settings",    tags=["settings"])
 app.include_router(daily.router,       prefix="/api/daily",       tags=["daily"])
 app.include_router(public.router,      prefix="/api/public",      tags=["public"])
+app.include_router(track.router,       prefix="/api/track",       tags=["track"])
 
 
 @app.get("/api/health")

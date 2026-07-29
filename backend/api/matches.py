@@ -108,6 +108,7 @@ async def set_match_result(
         raise HTTPException(status_code=409, detail="比赛结果已锁定，无法修改")
 
     match.actual_result = body.actual_result
+    match.result_locked = True
     if body.actual_score:
         match.actual_score = body.actual_score
 

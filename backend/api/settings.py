@@ -447,3 +447,58 @@ async def upsert_ensemble_config(
         db.add(cfg)
     await db.commit()
     return extra
+
+
+# ── 自动出票配置 ──────────────────────────────────────────────────────────────
+
+class AutoTicketConfigIn(BaseModel):
+    enabled: bool = False
+    cron: str = "30 9 * * *"        # 出票时间（Cron，Asia/Shanghai）
+    stake: float = 10.0              # 参考投注额
+    sync_cron: str = "0 2 * * *"    # 赛果同步时间
+
+
+@router.get("/auto-ticket")
+async def get_auto_ticket_config(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    result = await db.execute(
+        select(DataSourceConfig).where(
+            DataSourceConfig.user_id == current_user.id,
+            DataSourceConfig.source_name == "auto_ticket",
+        )
+    )
+    cfg = result.scalar_one_or_none()
+    if cfg and cfg.extra_config:
+        return cfg.extra_config
+    return AutoTicketConfigIn().model_dump()
+
+
+@router.put("/auto-ticket")
+async def upsert_auto_ticket_config(
+    data: AutoTicketConfigIn,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    extra = data.model_dump()
+    result = await db.execute(
+        select(DataSourceConfig).where(
+            DataSourceConfig.user_id == current_user.id,
+            DataSourceConfig.source_name == "auto_ticket",
+        )
+    )
+    cfg = result.scalar_one_or_none()
+    if cfg:
+        cfg.extra_config = extra
+        cfg.enabled = data.enabled
+    else:
+        cfg = DataSourceConfig(
+            user_id=current_user.id,
+            source_name="auto_ticket",
+            enabled=data.enabled,
+            extra_config=extra,
+        )
+        db.add(cfg)
+    await db.commit()
+    return extra

@@ -59,7 +59,7 @@ _STRUCTURED_JSON_INSTRUCTION = """
   "confidence": 72,
   "intel_summary": "30字以内核心情报摘要",
   "conservative_pick": {"market": "胜平负", "pick": "主胜", "note": "主场强队"},
-  "balanced_pick": {"market": "胜平负", "pick": "主胜/平", "note": "防平串关"},
+  "balanced_pick": {"market": "让球胜平负", "pick": "主胜", "note": "让球盘价值更优"},
   "high_odds_pick": {"market": "胜平负", "picks": ["平"], "note": "冷门覆盖"},
   "scoreline_picks": ["2-0", "3-0", "2-1"],
   "intel_adjustment": {"home": 0.0, "draw": 0.0, "away": 0.0},
@@ -84,6 +84,9 @@ _STRUCTURED_JSON_INSTRUCTION = """
 - risk_label: mainline（稳健主推）/ guarded（谨慎）/ upset_cover（冷门覆盖）/ avoid（建议跳过）
 - confidence: 0–100 整数，你对主推结果的把握程度
 - intel_adjustment: 概率调整量，正数增加该结果概率，三项之和应接近 0
+- market: "胜平负"（默认）或 "让球胜平负"；当让球盘赔率更有价值时，应填写 "让球胜平负"
+  - 参考提示中已给出让球盘赔率及模型对应概率，据此判断是否切换市场
+  - 让球盘 pick 含义：主队须赢对应让球数+1球才算"主胜"，赢恰好让球数算"平局"
 - factor_scores: 8 个因素的 0–100 评分（50 = 中性，>50 = 有利于投注方向）
 - abnormal_result: none / control_scoring / favorite_poor_form / underdog_strength / tactical_mismatch / variance / tournament_pattern
 - tournament_risk: low / medium / high（大赛控分/轮换风险等级）
@@ -308,7 +311,9 @@ class DailyPipeline:
             kw.lower() in league_lower for kw in TOURNAMENT_KEYWORDS
         )
 
-        injuries_text = await self._fetch_injuries(match)
+        # 收集情报包（并发拉取，单个失败不阻断）
+        intel = await self._build_intel_package(match)
+        injuries_text = intel.get("injuries_text", "")
         odds_movement = _compute_odds_movement(
             match.sporttery_odds_open, match.sporttery_odds
         )
@@ -324,14 +329,14 @@ class DailyPipeline:
                 "sporttery": match.sporttery_odds or {},
                 "overseas": match.overseas_odds or {},
             },
-            intel_data={"injuries": injuries_text} if injuries_text else None,
+            intel_data=intel if intel else None,
             odds_movement=odds_movement,
         )
 
         system_prompt = self.skills_injector.build_system_prompt(context)
         system_prompt += _STRUCTURED_JSON_INSTRUCTION
 
-        user_msg = self._build_prompt(match, fused_probs, injuries_text)
+        user_msg = self._build_prompt(match, fused_probs, intel)
 
         try:
             raw_text = await llm_client.chat(
@@ -347,6 +352,109 @@ class DailyPipeline:
             result = _default_llm_result()
             result["intel_summary"] = f"LLM 分析失败：{e}"
             return result
+
+    async def _build_intel_package(self, match) -> dict:
+        """并发拉取所有可用情报源，组装情报包。单个来源失败静默跳过。"""
+        import asyncio as _asyncio
+        tasks = {
+            "elo": _asyncio.create_task(self._fetch_elo(match)),
+            "form_home": _asyncio.create_task(self._fetch_recent_form(match.home_team, match.league, is_home=True)),
+            "form_away": _asyncio.create_task(self._fetch_recent_form(match.away_team, match.league, is_home=False)),
+            "h2h": _asyncio.create_task(self._fetch_h2h(match)),
+            "standings": _asyncio.create_task(self._fetch_standings(match)),
+            "injuries": _asyncio.create_task(self._fetch_injuries(match)),
+        }
+        results = {}
+        for key, task in tasks.items():
+            try:
+                results[key] = await task
+            except Exception as exc:
+                logger.debug("情报拉取失败 [%s]: %s", key, exc)
+                results[key] = None
+
+        intel: dict = {}
+
+        # Elo
+        if results["elo"]:
+            intel["elo"] = results["elo"]
+
+        # 近期战绩
+        if results["form_home"]:
+            intel["form_home"] = results["form_home"]
+        if results["form_away"]:
+            intel["form_away"] = results["form_away"]
+
+        # 历史交锋
+        if results["h2h"]:
+            intel["h2h"] = results["h2h"]
+
+        # 积分榜
+        if results["standings"]:
+            intel["standings"] = results["standings"]
+
+        # 伤停
+        injuries_text = results["injuries"] or ""
+        if injuries_text:
+            intel["injuries_text"] = injuries_text
+
+        return intel
+
+    async def _fetch_elo(self, match) -> dict | None:
+        try:
+            from core.data.providers.clubelo import ClubEloProvider
+            provider = ClubEloProvider()
+            elo_date = match.kickoff_at.date() if hasattr(match.kickoff_at, "date") else None
+            return await provider.get_match_elos(match.home_team, match.away_team, elo_date)
+        except Exception as exc:
+            logger.debug("Elo 拉取失败: %s", exc)
+            return None
+
+    async def _fetch_recent_form(self, team_cn: str, league_cn: str, is_home: bool) -> list[dict] | None:
+        try:
+            from core.data.providers.football_data import FootballDataProvider
+            provider = FootballDataProvider()
+            form = await provider.get_recent_form(team_cn, league_cn, n=6)
+            return form if form else None
+        except Exception as exc:
+            logger.debug("近期战绩拉取失败 [%s]: %s", team_cn, exc)
+            return None
+
+    async def _fetch_h2h(self, match) -> list[dict] | None:
+        try:
+            from core.data.providers.football_data import FootballDataProvider
+            provider = FootballDataProvider()
+            h2h = await provider.get_h2h(match.home_team, match.away_team, match.league, n=6)
+            return h2h if h2h else None
+        except Exception as exc:
+            logger.debug("历史交锋拉取失败: %s", exc)
+            return None
+
+    async def _fetch_standings(self, match) -> dict | None:
+        """返回两队在联赛积分榜的位置信息。"""
+        try:
+            settings = get_settings()
+            api_key = getattr(settings, "api_football_key", None)
+            if not api_key:
+                return None
+            from core.data.providers.api_football import APIFootballProvider
+            from core.data.team_names import resolve_to_english
+            provider = APIFootballProvider(api_key=api_key)
+            rows = await provider.get_standings(match.league)
+            if not rows:
+                return None
+            # 找出两队排名
+            home_en = resolve_to_english(match.home_team) or match.home_team
+            away_en = resolve_to_english(match.away_team) or match.away_team
+            home_entry = next(
+                (r for r in rows if r["team"].lower() in home_en.lower() or home_en.lower() in r["team"].lower()), None
+            )
+            away_entry = next(
+                (r for r in rows if r["team"].lower() in away_en.lower() or away_en.lower() in r["team"].lower()), None
+            )
+            return {"home": home_entry, "away": away_entry} if (home_entry or away_entry) else None
+        except Exception as exc:
+            logger.debug("积分榜拉取失败: %s", exc)
+            return None
 
     async def _fetch_injuries(self, match) -> str:
         try:
@@ -372,7 +480,7 @@ class DailyPipeline:
             return ""
 
     @staticmethod
-    def _build_prompt(match, fused_probs: dict, injuries_text: str) -> str:
+    def _build_prompt(match, fused_probs: dict, intel: dict) -> str:
         h = fused_probs.get("home", 0.35)
         d = fused_probs.get("draw", 0.28)
         a = fused_probs.get("away", 0.37)
@@ -385,11 +493,81 @@ class DailyPipeline:
         if match.sporttery_odds:
             o = match.sporttery_odds
             lines.append(
-                f"- 竞彩赔率：主胜 {o.get('home','-')} / 平 {o.get('draw','-')} / 客胜 {o.get('away','-')}"
+                f"- 竞彩赔率（胜平负）：主胜 {o.get('home','-')} / 平 {o.get('draw','-')} / 客胜 {o.get('away','-')}"
             )
+            hhad = o.get("hhad")
+            if hhad and isinstance(hhad, dict):
+                from core.tickets.hhad import format_handicap, had_to_hhad
+                hcp = hhad.get("handicap", 0)
+                hcp_label = format_handicap(hcp)
+                lines.append(
+                    f"- 竞彩赔率（让球，{hcp_label}）："
+                    f"主胜 {hhad.get('home','-')} / 平 {hhad.get('draw','-')} / 客胜 {hhad.get('away','-')}"
+                )
+                # 给 LLM 展示模型对让球盘的概率估算，辅助判断价值
+                ph, pd, pa = had_to_hhad(h, d, a, hcp)
+                lines.append(
+                    f"- 让球盘模型概率（{hcp_label}）：主胜 {ph:.1%} / 平 {pd:.1%} / 客胜 {pa:.1%}"
+                )
         lines.append(f"- 统计融合概率：主胜 {h:.1%} / 平 {d:.1%} / 客胜 {a:.1%}")
+
+        # Elo 评分
+        elo = intel.get("elo")
+        if elo:
+            diff = round(elo["home_elo"] - elo["away_elo"])
+            sign = "+" if diff >= 0 else ""
+            lines.append(
+                f"- Elo 评分：主队 {elo['home_elo']:.0f} | 客队 {elo['away_elo']:.0f} | 差值 {sign}{diff}"
+            )
+
+        # 积分榜
+        standings = intel.get("standings")
+        if standings:
+            home_s = standings.get("home")
+            away_s = standings.get("away")
+            if home_s:
+                lines.append(
+                    f"- 主队联赛排名：第 {home_s['rank']} 位 / 积 {home_s['points']} 分 / "
+                    f"{home_s['won']}胜{home_s['drawn']}平{home_s['lost']}负 / 近5场：{home_s.get('form','')}"
+                )
+            if away_s:
+                lines.append(
+                    f"- 客队联赛排名：第 {away_s['rank']} 位 / 积 {away_s['points']} 分 / "
+                    f"{away_s['won']}胜{away_s['drawn']}平{away_s['lost']}负 / 近5场：{away_s.get('form','')}"
+                )
+
+        # 近期战绩
+        form_home = intel.get("form_home")
+        form_away = intel.get("form_away")
+        if form_home:
+            lines.append(f"\n【主队 {match.home_team} 近期战绩（最近{len(form_home)}场）】")
+            for m in form_home:
+                venue = "主" if m["home_away"] == "H" else "客"
+                score = f"{m['gf']}-{m['ga']}" if m["gf"] is not None else "-"
+                xg_str = f"（xG {m['xg']:.1f}:{m['xga']:.1f}）" if m.get("xg") is not None else ""
+                lines.append(f"  {m['date']} vs {m['opponent']}（{venue}） {m['result']} {score}{xg_str}")
+
+        if form_away:
+            lines.append(f"\n【客队 {match.away_team} 近期战绩（最近{len(form_away)}场）】")
+            for m in form_away:
+                venue = "主" if m["home_away"] == "H" else "客"
+                score = f"{m['gf']}-{m['ga']}" if m["gf"] is not None else "-"
+                xg_str = f"（xG {m['xg']:.1f}:{m['xga']:.1f}）" if m.get("xg") is not None else ""
+                lines.append(f"  {m['date']} vs {m['opponent']}（{venue}） {m['result']} {score}{xg_str}")
+
+        # 历史交锋
+        h2h = intel.get("h2h")
+        if h2h:
+            lines.append(f"\n【历史交锋（近{len(h2h)}场）】")
+            for m in h2h:
+                score = f"{m['home_goals']}-{m['away_goals']}" if m["home_goals"] is not None else "-"
+                lines.append(f"  {m['date']} {m['home_team']} vs {m['away_team']}：{score}（{m['result']}）")
+
+        # 伤停
+        injuries_text = intel.get("injuries_text", "")
         if injuries_text:
-            lines.append(f"\n伤停情报：{injuries_text}")
+            lines.append(f"\n【伤停情报】\n{injuries_text}")
+
         lines.append("\n请完成分析并在末尾输出要求的 JSON 代码块。")
         return "\n".join(lines)
 

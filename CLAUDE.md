@@ -194,6 +194,7 @@ SourceManager 优先级：`竞彩 API Key → Playwright 爬虫 → Redis 缓存
 ## 开发规范
 
 ### 前端设计规范（强制）
+- **移动端优先**：视口 < 768px 为主要设计目标；PC（≥768px）为兼容适配。所有交互元素最小点击区域 44×44px，触摸优先
 - **所有前端页面改动必须同时调用 `design-taste-frontend` + `ui-ux-pro-max-skill` 两个技能**
 - 先用 `/design-taste-frontend` 输出 Design Read + 拨盘设定，再执行实现
 - 本项目 UI 基调：Data-Dense Dashboard，VARIANCE:5 / MOTION:2 / DENSITY:9
