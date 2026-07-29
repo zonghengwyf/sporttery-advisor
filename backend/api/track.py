@@ -96,8 +96,8 @@ async def list_runs(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # Include user_id=0 (system/scheduler runs) so scheduled jobs appear alongside manual ones
-    _uid_filter = or_(AutoTicketRun.user_id == current_user.id, AutoTicketRun.user_id == 0)
+    # Include user_id=NULL (system/scheduler runs) so scheduled jobs appear alongside manual ones
+    _uid_filter = or_(AutoTicketRun.user_id == current_user.id, AutoTicketRun.user_id.is_(None))
     stmt = (
         select(AutoTicketRun)
         .where(_uid_filter)
@@ -115,7 +115,7 @@ async def get_summary(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    _uid_filter = or_(AutoTicketRun.user_id == current_user.id, AutoTicketRun.user_id == 0)
+    _uid_filter = or_(AutoTicketRun.user_id == current_user.id, AutoTicketRun.user_id.is_(None))
     result = await db.execute(
         select(AutoTicketRun).where(_uid_filter)
     )
@@ -167,7 +167,7 @@ async def get_run(
     current_user: User = Depends(get_current_user),
 ):
     run = await db.get(AutoTicketRun, run_id)
-    if not run or (run.user_id != current_user.id and run.user_id != 0):
+    if not run or (run.user_id != current_user.id and run.user_id is not None):
         raise HTTPException(status_code=404, detail="记录不存在")
     return _serialize_run(run)
 
@@ -197,7 +197,7 @@ async def sync_run(
 ):
     """手动触发该次记录的赛果同步。"""
     run = await db.get(AutoTicketRun, run_id)
-    if not run or (run.user_id != current_user.id and run.user_id != 0):
+    if not run or (run.user_id != current_user.id and run.user_id is not None):
         raise HTTPException(status_code=404, detail="记录不存在")
 
     from workers.tasks import _sync_one_auto_ticket_run

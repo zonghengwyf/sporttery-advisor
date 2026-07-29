@@ -295,7 +295,7 @@ async def run_auto_ticket(
         if not match_ids:
             logger.warning("auto_ticket: 今日无赛事，跳过出票")
             skip_run = AutoTicketRun(
-                user_id=user_id or 0, run_date=today, trigger=trigger,
+                user_id=user_id, run_date=today, trigger=trigger,
                 model_info={}, match_ids=[], tickets_json={}, stake=0,
                 sync_status="skipped", sync_error="今日无赛事",
             )
@@ -322,7 +322,7 @@ async def run_auto_ticket(
         if not preds:
             logger.warning("auto_ticket: 今日无可用 Prediction，跳过")
             skip_run = AutoTicketRun(
-                user_id=user_id or 0, run_date=today, trigger=trigger,
+                user_id=user_id, run_date=today, trigger=trigger,
                 model_info={}, match_ids=match_ids, tickets_json={}, stake=0,
                 sync_status="skipped", sync_error="今日无可用预测",
             )
@@ -331,8 +331,8 @@ async def run_auto_ticket(
             await session.refresh(skip_run)
             return skip_run.id
 
-        # 收集 model_info（查用户 LLM 配置）
-        _uid = user_id or 0
+        # 收集 model_info（查用户 LLM 配置，user_id=None 时跳过个人配置查询）
+        _uid = user_id
         llm_result = await session.execute(
             sa_select(LLMConfig).where(
                 LLMConfig.user_id == _uid,

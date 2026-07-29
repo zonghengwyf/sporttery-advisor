@@ -132,7 +132,7 @@ class AutoTicketRun(Base):
     __tablename__ = "auto_ticket_runs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     run_date: Mapped[date] = mapped_column(Date, nullable=False)
     trigger: Mapped[str] = mapped_column(String(20), default="scheduled")  # scheduled / manual
     # {llms: ["claude-sonnet-4-6", "deepseek-v3"], type: "ensemble"|"single", consensus_ratio: 0.8}

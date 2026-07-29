@@ -3,7 +3,7 @@ import math
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -40,17 +40,17 @@ class LegIn(BaseModel):
 
 class CreateBetRequest(BaseModel):
     prediction_id: int | None = None
-    plan_id: str                    # conservative / balanced / high_odds / manual
-    legs: list[LegIn]
-    stake: float
-    expected_payout: float | None = None
-    note: str | None = None
+    plan_id: str = Field(pattern=r"^(conservative|balanced|high_odds|manual)$")
+    legs: list[LegIn] = Field(min_length=1, max_length=20)
+    stake: float = Field(gt=0, le=100_000)
+    expected_payout: float | None = Field(default=None, gt=0)
+    note: str | None = Field(default=None, max_length=500)
 
 
 class UpdateBetRequest(BaseModel):
     status: str | None = None       # won / lost / void
-    payout: float | None = None
-    note: str | None = None
+    payout: float | None = Field(default=None, gt=0)
+    note: str | None = Field(default=None, max_length=500)
 
 
 # ── 辅助 ──────────────────────────────────────────────────────────────────────
