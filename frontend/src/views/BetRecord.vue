@@ -63,6 +63,7 @@ interface AutoLeg {
   away_team?: string
   league?: string
   pick: string
+  market?: string
   odds?: number
   won?: boolean
   actual_result?: string
@@ -358,6 +359,42 @@ const leagueAccuracy = computed<Record<string, {total: number; won: number}>>(()
   return Object.fromEntries(Object.entries(groups).sort((a, b) => b[1].total - a[1].total))
 })
 const hasLeagueData = computed(() => Object.keys(leagueAccuracy.value).length > 0)
+
+// ── 选项准确率（腿层级，按 pick × market）───────────────────────
+interface PickAcc { total: number; won: number; label: string; order: number }
+const PICK_KEYS: Record<string, PickAcc> = {
+  'HAD_主胜':   { total: 0, won: 0, label: '主胜',   order: 0 },
+  'HAD_平局':   { total: 0, won: 0, label: '平局',   order: 1 },
+  'HAD_客胜':   { total: 0, won: 0, label: '客胜',   order: 2 },
+  'HHAD_主胜':  { total: 0, won: 0, label: '让球胜', order: 3 },
+  'HHAD_平局':  { total: 0, won: 0, label: '让球平', order: 4 },
+  'HHAD_客胜':  { total: 0, won: 0, label: '让球负', order: 5 },
+}
+const pickAccuracy = computed<Record<string, PickAcc>>(() => {
+  const groups: Record<string, PickAcc> = Object.fromEntries(
+    Object.entries(PICK_KEYS).map(([k, v]) => [k, { ...v }])
+  )
+  for (const run of autoRuns.value) {
+    if (run.sync_status === 'pending' || run.sync_status === 'skipped') continue
+    for (const scheme of run.schemes ?? []) {
+      if (scheme.status === 'pending') continue
+      for (const leg of scheme.legs ?? []) {
+        if (leg.won === undefined || leg.won === null) continue
+        const marketKey = leg.market === '让球胜平负' ? 'HHAD' : 'HAD'
+        const key = `${marketKey}_${leg.pick}`
+        if (!groups[key]) continue
+        groups[key].total++
+        if (leg.won) groups[key].won++
+      }
+    }
+  }
+  return Object.fromEntries(
+    Object.entries(groups).sort((a, b) => a[1].order - b[1].order)
+  )
+})
+const hasPickData = computed(() =>
+  Object.values(pickAccuracy.value).some(a => a.total > 0)
+)
 </script>
 
 <template>
@@ -697,6 +734,32 @@ const hasLeagueData = computed(() => Object.keys(leagueAccuracy.value).length > 
                 {{ (acc.won / acc.total * 100).toFixed(0) }}%
               </div>
               <div class="acc-pill-n font-num">n={{ acc.total }}</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ZONE 6: 按选项准确率（腿级） -->
+        <div v-if="hasPickData" class="zone-section">
+          <div class="zone-header">按选项准确率（腿级）</div>
+          <div class="pick-acc-grid" role="list">
+            <div
+              v-for="(acc, key) in pickAccuracy"
+              :key="key"
+              class="pick-acc-cell"
+              :class="{ 'pac-best': bestKey(pickAccuracy) === String(key) && acc.total >= 5 }"
+              :aria-label="`${acc.label}命中率${acc.total >= 5 ? (acc.won / acc.total * 100).toFixed(0) + '%' : '数据不足'}，${acc.total}个样本`"
+              role="listitem"
+            >
+              <div class="pac-label">
+                {{ acc.label }}
+                <span v-if="bestKey(pickAccuracy) === String(key) && acc.total >= 5" class="best-badge">最佳</span>
+              </div>
+              <div v-if="acc.total === 0" class="pac-val pac-insufficient">待结算</div>
+              <div v-else-if="acc.total < 5" class="pac-val pac-insufficient">数据不足</div>
+              <div v-else class="pac-val font-num" :class="hitRateClass(acc.won / acc.total * 100)">
+                {{ (acc.won / acc.total * 100).toFixed(0) }}%
+              </div>
+              <div class="pac-n font-num">n={{ acc.total }}</div>
             </div>
           </div>
         </div>
@@ -1554,6 +1617,44 @@ const hasLeagueData = computed(() => Object.keys(leagueAccuracy.value).length > 
   background: color-mix(in srgb, var(--primary) 8%, var(--card)) !important;
 }
 .acc-pill-best {
+  border-color: color-mix(in srgb, #22c55e 60%, var(--line)) !important;
+}
+
+/* ── Zone 6 Pick accuracy grid ───────────────────────────────── */
+.pick-acc-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+.pick-acc-cell {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px 10px 8px;
+  min-height: 72px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+}
+.pac-label {
+  font-size: 11px;
+  color: var(--text2);
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.pac-val {
+  font-size: 18px;
+  font-weight: 800;
+  line-height: 1.1;
+  margin-top: 2px;
+}
+.pac-insufficient { font-size: 10px; color: var(--text3); font-weight: 500; margin-top: 4px; }
+.pac-n { font-size: 9px; color: var(--text3); }
+.pac-best {
   border-color: color-mix(in srgb, #22c55e 60%, var(--line)) !important;
 }
 
