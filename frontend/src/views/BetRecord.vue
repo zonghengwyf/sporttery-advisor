@@ -611,7 +611,7 @@ const hasLeagueData = computed(() => Object.keys(leagueAccuracy.value).length > 
               {{ acc.label }}
               <span v-if="bestKey(schemeAccuracy) === String(planId) && acc.total >= 5" class="best-badge">最佳</span>
             </div>
-            <div v-if="acc.total === 0" class="scheme-acc-val scheme-acc-insufficient">——</div>
+            <div v-if="acc.total === 0" class="scheme-acc-val scheme-acc-insufficient">待结算</div>
             <div v-else-if="acc.total < 5" class="scheme-acc-val scheme-acc-insufficient">数据不足</div>
             <div v-else class="scheme-acc-val font-num" :class="hitRateClass(acc.won / acc.total * 100)">
               {{ (acc.won / acc.total * 100).toFixed(0) }}%
