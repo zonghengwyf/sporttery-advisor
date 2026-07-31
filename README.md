@@ -7,6 +7,7 @@
 - **今日分析** — 自动同步当日竞彩赛单，展示赔率快照与 AI 风险标签
 - **单场详情** — Dixon-Coles 概率条图、赔率价值对比、情报摘要、一键 AI 分析
 - **投注方案** — 稳健票 / 均衡票 / 博高赔票 / 比分小注 + 自动资金分配
+- **自动追踪** — 系统每日自动出票，赛后同步赛果，生成可回溯的「推荐→赛果→盈亏」时间线
 - **AI 对话** — SSE 流式追问式分析，注入竞彩 Skills 领域知识
 - **回测报告** — Brier / Log-loss / RPS / ECE 精度指标，对标竞彩 SP 基线
 - **系统设置** — 多 LLM 模型配置 + 数据源 API Key 管理
@@ -121,6 +122,10 @@ sporttery-advisor/
 │   │   ├── matches.py      # 赛事列表 / 同步
 │   │   ├── predictions.py  # 预测结果 / 批量状态
 │   │   ├── tickets.py      # 投注方案生成
+│   │   ├── bets.py         # 用户投注记录 CRUD
+│   │   ├── track.py        # 自动出票追踪 / 赛果同步
+│   │   ├── daily.py        # 今日推荐方案 / 多模型集成分析
+│   │   ├── public.py       # 公开分享端点（无需认证）
 │   │   ├── chat.py         # SSE 流式对话
 │   │   ├── backtest.py     # 回测指标
 │   │   └── settings.py     # LLM / 数据源配置
@@ -149,7 +154,15 @@ sporttery-advisor/
 │       └── tasks.py
 ├── frontend/
 │   └── src/
-│       ├── views/                  # 6 个页面
+│       ├── views/
+│       │   ├── DailyAnalysis.vue   # 今日赛事列表
+│       │   ├── MatchDetail.vue     # 单场详情 + 概率图
+│       │   ├── BettingTickets.vue  # 投注方案 4 票型
+│       │   ├── BetRecord.vue       # 自动出票追踪 + 赛果时间线
+│       │   ├── BacktestReport.vue  # 回测精度报告
+│       │   ├── ChatAnalysis.vue    # AI 流式对话
+│       │   ├── Settings.vue        # LLM / 数据源配置
+│       │   └── Login.vue
 │       ├── api.ts                  # Axios（Bearer token）
 │       ├── router.ts
 │       └── style.css               # 设计系统（CSS 变量 + 组件类）
@@ -177,7 +190,8 @@ Data-Dense Dashboard 风格，适配深色侧边栏 + 浅色内容区。
 | Phase 2 | 统计模型：Dixon-Coles + 市场融合 + 校准 + DuckDB | ✅ 完成 |
 | Phase 3 | 核心分析层：LLM 情报 + Skills 条件激活 + 票型生成 | ✅ 完成 |
 | Phase 4 | 前端完整功能：概率图表 + 投注方案联调 + 分析状态徽章 | ✅ 完成 |
-| Phase 5 | 生产化：多用户 JWT + 自动调度 + Docker 部署 | ⏳ 待 |
+| Phase 5 | 自动出票追踪：BetRecord 页面 + 赛果同步 + 准确率统计 | ✅ 完成 |
+| Phase 6 | 生产化：完整多用户 JWT + 自动调度 + Docker 完整部署文档 | ⏳ 待 |
 
 ## 致谢
 

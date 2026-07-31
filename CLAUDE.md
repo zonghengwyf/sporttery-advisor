@@ -28,9 +28,10 @@ Available skills: /office-hours, /plan-ceo-review, /plan-eng-review, /plan-desig
 **主要功能**：
 1. **今日分析** — 自动同步当日竞彩赛单，展示赔率和 AI 概率预测
 2. **投注方案** — 生成稳健票/均衡票/博高赔票/比分小注 + 资金分配
-3. **AI 对话** — 流式 SSE 追问式分析，注入 Skills 领域知识
-4. **回测报告** — Brier / Log-loss / RPS / ECE 精度指标，对标竞彩 SP 基线
-5. **系统设置** — LLM 多模型配置 + 数据源 API Key 管理
+3. **自动追踪** — 系统每日自动出票，赛后同步赛果，生成「推荐→赛果→盈亏」时间线
+4. **AI 对话** — 流式 SSE 追问式分析，注入 Skills 领域知识
+5. **回测报告** — Brier / Log-loss / RPS / ECE 精度指标，对标竞彩 SP 基线
+6. **系统设置** — LLM 多模型配置 + 数据源 API Key 管理
 
 **差异化**：
 - Skills 注入机制：将 `china-sporttery-football-advisor` 的竞彩决策规则（控分识别、激励分析、异常阵型等）注入 LLM system prompt，不依赖 Claude Code 运行时
@@ -64,6 +65,10 @@ sporttery-advisor/
 │   │   ├── matches.py                 # 赛事列表/详情/手动同步
 │   │   ├── predictions.py             # 预测结果查询
 │   │   ├── tickets.py                 # 投注方案生成
+│   │   ├── bets.py                    # 用户投注记录 CRUD（/api/bets）
+│   │   ├── track.py                   # 自动出票追踪 + 赛果同步（/api/track）
+│   │   ├── daily.py                   # 今日推荐方案 + 多模型集成分析（/api/daily）
+│   │   ├── public.py                  # 公开分享端点，无需认证（/api/public）
 │   │   ├── chat.py                    # SSE 流式 AI 对话
 │   │   ├── backtest.py                # 回测指标（DuckDB）
 │   │   └── settings.py                # LLM/数据源配置 CRUD
@@ -75,7 +80,9 @@ sporttery-advisor/
 │   │   │   ├── dixon_coles.py         # Dixon-Coles 拟合 + 预测
 │   │   │   ├── calibration.py         # 温度校准
 │   │   │   ├── odds.py                # 去水差 + 价值评估
-│   │   │   └── fusion.py              # 多源概率融合
+│   │   │   ├── fusion.py              # 多源概率融合
+│   │   │   ├── factor_scorer.py       # 8因素置信度评分（来自 factor-model.md）
+│   │   │   └── model_registry.py      # Champion/Challenger 模型注册 + DuckDB 晋升门控
 │   │   ├── data/
 │   │   │   ├── providers/
 │   │   │   │   ├── sporttery_api.py   # 竞彩官方 API
@@ -88,7 +95,8 @@ sporttery-advisor/
 │   │   │   ├── snapshot.py            # DuckDB 快照管理
 │   │   │   └── sync.py                # 赛单同步编排
 │   │   ├── tickets/
-│   │   │   └── generator.py           # 票型生成器（Phase 3 完善）
+│   │   │   ├── generator.py           # 票型生成器（Phase 3 完善）
+│   │   │   └── hhad.py                # 让球盘（HHAD）概率转换：HAD + 让球数 → 三结果分布
 │   │   └── pipeline.py                # 每日端到端流水线（Phase 3）
 │   ├── skills/                         # Skills Markdown 文件（注入 LLM）
 │   │   ├── SKILL.md                   # 主工作流（来自 china-sporttery-football-advisor）
@@ -97,7 +105,7 @@ sporttery-advisor/
 │   │   ├── sporttery-output.md        # 竞彩输出格式
 │   │   └── tournament-incentives.md   # 大赛激励分析
 │   ├── db/
-│   │   ├── models.py                  # SQLAlchemy ORM（6 个模型）
+│   │   ├── models.py                  # SQLAlchemy ORM（User/LLMConfig/DataSourceConfig/Match/Prediction/ChatSession/AutoTicketRun）
 │   │   └── session.py                 # AsyncSessionLocal + get_db
 │   └── workers/
 │       ├── scheduler.py               # APScheduler 每日调度
@@ -105,11 +113,18 @@ sporttery-advisor/
 ├── frontend/
 │   ├── src/
 │   │   ├── layouts/MainLayout.vue     # 响应式布局（PC 侧边栏 + 移动底导航）
+│   │   ├── components/
+│   │   │   └── ChatFab.vue            # 浮动 AI 对话按钮（跨页面悬浮，可拖拽，含内联聊天面板）
+│   │   ├── stores/
+│   │   │   ├── auth.ts                # 用户认证状态（JWT）
+│   │   │   ├── betting.ts             # 投注记录 + 方案状态
+│   │   │   └── chat.ts                # 全局对话状态（ChatFab 共享）
 │   │   ├── views/
 │   │   │   ├── Login.vue              # 登录页
 │   │   │   ├── DailyAnalysis.vue      # 今日赛事列表
 │   │   │   ├── MatchDetail.vue        # 单场详情 + 概率图
 │   │   │   ├── BettingTickets.vue     # 投注方案 4 票型
+│   │   │   ├── BetRecord.vue          # 自动出票追踪 + 赛果时间线（追踪页）
 │   │   │   ├── BacktestReport.vue     # 回测精度报告
 │   │   │   ├── ChatAnalysis.vue       # AI 流式对话
 │   │   │   └── Settings.vue           # LLM/数据源配置
@@ -121,7 +136,16 @@ sporttery-advisor/
 ├── docker-compose.yml                 # 5 services: frontend/backend/worker/postgres/redis
 ├── DESIGN.md                          # 产品设计文档（/office-hours 输出）
 └── docs/
-    └── ARCHITECTURE.md                # 技术架构文档（/plan-eng-review 输出）
+    ├── ARCHITECTURE.md                # 技术架构文档（/plan-eng-review 输出）
+    ├── AUTO_TRACK_DESIGN.md           # 自动追踪功能设计（数据模型 + 菜单决策）
+    ├── TRACK_PAGE_REQUIREMENTS.md     # 追踪页面详细需求（2026-07-31）
+    └── adr/                           # Architecture Decision Records
+        ├── TEMPLATE.md                # ADR 写作模板
+        ├── ADR-001-skills-injection.md
+        ├── ADR-002-duckdb-postgres-split.md
+        ├── ADR-003-llm-openai-compat.md
+        ├── ADR-004-data-source-fallback.md
+        └── ADR-005-model-registry-champion-challenger.md
 ```
 
 ## 当前进度
@@ -134,7 +158,7 @@ sporttery-advisor/
 - Skills 注入系统（SkillsInjector，条件激活 5 个 Markdown skills）
 - SSE 流式 AI 对话（`/api/chat/stream`）
 - JWT 认证
-- Vue 3 完整前端（6 个页面全部实现）
+- Vue 3 完整前端骨架（初始 6 个页面）
 - 响应式布局（PC 深色侧边栏 + 移动端底导航）
 - 完整设计系统（Tailwind + CSS 变量，Data-Dense Dashboard 风格）
 
@@ -166,7 +190,16 @@ sporttery-advisor/
 - `ChatAnalysis.vue`：SSE 流式对话，关联比赛上下文
 - 设计审查（ui-ux-pro-max）：确认设计系统对齐 Data-Dense Dashboard 规范
 
-### ⏳ Phase 5 — 生产化（待）
+### ✅ Phase 5 — 自动出票追踪（完成）
+- `BetRecord.vue`：自动出票追踪页面，含整体统计、分类准确率、收益分析、选项精度、赛果分布
+- `api/track.py`：历史出票列表、单次详情、赛果同步（`/api/track`）
+- `api/bets.py`：用户投注记录 CRUD（`/api/bets`）
+- `api/daily.py`：今日推荐方案 + 多模型集成分析（`/api/daily`）
+- `api/public.py`：公开分享端点（`/api/public`）
+- `db/models.py`：新增 `AutoTicketRun` 表（出票记录 + 赛果结果）
+- 导航整合：底部导航新增「追踪」菜单项
+
+### ⏳ Phase 6 — 生产化（待）
 - 完整 JWT 多用户流程
 - APScheduler 每日自动调度
 - Docker 完整打包 + 部署文档

@@ -7,7 +7,7 @@
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                     Vue 3 Frontend (Nginx)                       │
-│  DailyAnalysis │ MatchDetail │ BettingTickets │ Chat │ Settings  │
+│  DailyAnalysis │ MatchDetail │ BettingTickets │ BetRecord │ Chat  │
 └──────────────────────────┬──────────────────────────────────────┘
                            │ HTTP/SSE  (/api/*)
 ┌──────────────────────────▼──────────────────────────────────────┐
@@ -33,7 +33,7 @@
           │                           │
     PostgreSQL                     DuckDB
   用户/配置/赛事/预测            快照/回测历史
-  ChatSession                     prediction_snapshots
+  ChatSession/AutoTicketRun       prediction_snapshots
                                    backtest_results
 ```
 
@@ -139,6 +139,15 @@ predictions: id, match_id→matches, run_id, stat_probs(jsonb),
 -- 对话
 chat_sessions: id, user_id→users, match_id→matches,
                title, messages(jsonb array), created_at, updated_at
+
+-- 自动出票追踪
+auto_ticket_runs: id, user_id→users, run_date, trigger(scheduled|manual),
+                  model_info(jsonb),      -- {llms, type, consensus_ratio}
+                  match_ids(jsonb),       -- 出票时使用的 match_id 列表
+                  tickets_json(jsonb),    -- 完整票型（与 /api/tickets 响应格式一致）
+                  sync_status(pending|synced|failed|partial),
+                  sync_error, results_json(jsonb),  -- {match_id: {actual, score}}
+                  created_at, synced_at
 ```
 
 ### DuckDB（分析快照）
@@ -179,6 +188,17 @@ backtest_results: id, match_id, run_date, predicted(json),
 | DELETE | /api/settings/llm/{id} | 删除配置 |
 | GET  | /api/settings/datasource | 数据源配置 |
 | PUT  | /api/settings/datasource | 更新数据源配置 |
+| POST | /api/bets/ | 创建投注记录 |
+| GET  | /api/bets/ | 投注记录列表 |
+| GET  | /api/bets/summary | 投注统计摘要 |
+| GET  | /api/track/runs | 自动出票历史列表（分页） |
+| GET  | /api/track/runs/{id} | 单次出票详情 |
+| POST | /api/track/runs/{id}/sync-results | 触发赛果同步 |
+| GET  | /api/track/stats | 聚合统计（命中率/ROI/选项精度） |
+| GET  | /api/daily/today-plan | 今日串关方案 |
+| POST | /api/daily/run-analysis | 触发多模型集成分析 |
+| GET  | /api/daily/model-accuracy | 各模型历史准确率 |
+| GET  | /api/public/plan | 今日推荐方案（无需认证，供分享链接）|
 
 ## 边界条件与失败处理
 
