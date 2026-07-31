@@ -395,6 +395,49 @@ const pickAccuracy = computed<Record<string, PickAcc>>(() => {
 const hasPickData = computed(() =>
   Object.values(pickAccuracy.value).some(a => a.total > 0)
 )
+
+// ── 赛果实际分布（H/D/A）────────────────────────────────────────
+const resultDistribution = computed<Record<string, number>>(() => {
+  const dist: Record<string, number> = {}
+  const seen = new Set<string>()
+  for (const run of autoRuns.value) {
+    if (run.sync_status === 'pending' || run.sync_status === 'skipped') continue
+    for (const scheme of run.schemes ?? []) {
+      if (scheme.status === 'pending') continue
+      for (const leg of scheme.legs ?? []) {
+        if (!leg.actual_result) continue
+        const key = `${run.id}_${leg.match_id}`
+        if (seen.has(key)) continue
+        seen.add(key)
+        dist[leg.actual_result] = (dist[leg.actual_result] ?? 0) + 1
+      }
+    }
+  }
+  return dist
+})
+const resultTotal = computed(() => Object.values(resultDistribution.value).reduce((s, n) => s + n, 0))
+const hasResultData = computed(() => resultTotal.value > 0)
+
+// ── 各方案类型 ROI ────────────────────────────────────────────────
+interface SchemeRoiAcc { stake: number; profit: number; count: number }
+const schemeRoi = computed<Record<string, SchemeRoiAcc>>(() => {
+  const groups: Record<string, SchemeRoiAcc> = {}
+  for (const run of autoRuns.value) {
+    for (const scheme of run.schemes ?? []) {
+      if (scheme.status === 'pending' || scheme.profit == null) continue
+      const pid = scheme.plan_id
+      if (!groups[pid]) groups[pid] = { stake: 0, profit: 0, count: 0 }
+      groups[pid].stake += run.stake
+      groups[pid].profit += scheme.profit
+      groups[pid].count++
+    }
+  }
+  return groups
+})
+const hasRoiData = computed(() => Object.keys(schemeRoi.value).length > 0)
+const maxAbsProfit = computed(() =>
+  Math.max(1, ...Object.values(schemeRoi.value).map(r => Math.abs(r.profit)))
+)
 </script>
 
 <template>
@@ -738,28 +781,76 @@ const hasPickData = computed(() =>
           </div>
         </div>
 
-        <!-- ZONE 6: 按选项准确率（腿级） -->
+        <!-- ZONE 6: 按选项准确率（腿级，横向条形） -->
         <div v-if="hasPickData" class="zone-section">
-          <div class="zone-header">按选项准确率（腿级）</div>
-          <div class="pick-acc-grid" role="list">
+          <div class="zone-header">选项命中率（单场）</div>
+          <div class="par-list" role="list">
             <div
               v-for="(acc, key) in pickAccuracy"
               :key="key"
-              class="pick-acc-cell"
-              :class="{ 'pac-best': bestKey(pickAccuracy) === String(key) && acc.total >= 5 }"
-              :aria-label="`${acc.label}命中率${acc.total >= 5 ? (acc.won / acc.total * 100).toFixed(0) + '%' : '数据不足'}，${acc.total}个样本`"
+              class="par-row"
               role="listitem"
+              :aria-label="`${acc.label}命中率${acc.total >= 3 ? (acc.won / acc.total * 100).toFixed(0) + '%' : '数据不足'}，${acc.total}个样本`"
             >
-              <div class="pac-label">
+              <span class="par-label">
                 {{ acc.label }}
                 <span v-if="bestKey(pickAccuracy) === String(key) && acc.total >= 5" class="best-badge">最佳</span>
+              </span>
+              <div class="par-bar-track">
+                <div
+                  class="par-bar-fill"
+                  :class="acc.total >= 3 ? hitRateClass(acc.won / acc.total * 100) + '-bar' : 'muted-bar'"
+                  :style="`width:${acc.total > 0 ? (acc.won / acc.total * 100).toFixed(0) : 0}%`"
+                />
               </div>
-              <div v-if="acc.total === 0" class="pac-val pac-insufficient">待结算</div>
-              <div v-else-if="acc.total < 5" class="pac-val pac-insufficient">数据不足</div>
-              <div v-else class="pac-val font-num" :class="hitRateClass(acc.won / acc.total * 100)">
-                {{ (acc.won / acc.total * 100).toFixed(0) }}%
+              <span class="par-pct font-num" :class="acc.total >= 3 ? hitRateClass(acc.won / acc.total * 100) : ''">
+                {{ acc.total >= 3 ? (acc.won / acc.total * 100).toFixed(0) + '%' : acc.total > 0 ? '少' : '—' }}
+              </span>
+              <span class="par-detail font-num">{{ acc.won }}/{{ acc.total }}</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- ZONE 7: 赛果实际分布 -->
+        <div v-if="hasResultData" class="zone-section">
+          <div class="zone-header">赛果分布（{{ resultTotal }} 场已结算）</div>
+          <div class="rdr-strip">
+            <div
+              v-for="(count, result) in resultDistribution"
+              :key="result"
+              class="rdr-cell"
+            >
+              <div class="rdr-label">{{ { H:'主胜', D:'平局', A:'客胜' }[result] ?? result }}</div>
+              <div class="rdr-pct font-num" :class="`rdr-${result}`">
+                {{ resultTotal > 0 ? (count / resultTotal * 100).toFixed(0) : 0 }}%
               </div>
-              <div class="pac-n font-num">n={{ acc.total }}</div>
+              <div class="rdr-bar-track">
+                <div class="rdr-bar" :class="`rdr-bar-${result}`" :style="`width:${resultTotal > 0 ? (count / resultTotal * 100).toFixed(0) : 0}%`" />
+              </div>
+              <div class="rdr-n font-num">{{ count }} 场</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ZONE 8: 方案收益分析 -->
+        <div v-if="hasRoiData" class="zone-section">
+          <div class="zone-header">方案收益分析</div>
+          <div class="roi-rows">
+            <div v-for="(roi, pid) in schemeRoi" :key="pid" class="roi-row">
+              <span class="roi-name">{{ planLabel(pid) }}</span>
+              <div class="roi-bar-track">
+                <div
+                  class="roi-bar-fill"
+                  :class="roi.profit >= 0 ? 'roi-pos' : 'roi-neg'"
+                  :style="`width:${(Math.abs(roi.profit) / maxAbsProfit * 100).toFixed(0)}%`"
+                />
+              </div>
+              <div class="roi-right">
+                <span class="roi-profit font-num" :class="roi.profit >= 0 ? 'text-green' : 'text-red'">
+                  {{ roi.profit >= 0 ? '+' : '' }}¥{{ roi.profit.toFixed(0) }}
+                </span>
+                <span class="roi-meta font-num">{{ roi.count }}次 · {{ roi.stake > 0 ? (roi.profit / roi.stake * 100).toFixed(0) : 0 }}% ROI</span>
+              </div>
             </div>
           </div>
         </div>
@@ -1377,6 +1468,9 @@ const hasPickData = computed(() =>
   text-decoration: underline;
 }
 
+/* ── Zone section wrapper ─────────────────────────────────────── */
+.zone-section { background: var(--bg); }
+
 /* ── Zone header ─────────────────────────────────────────────── */
 .zone-header {
   font-size: 10px;
@@ -1499,6 +1593,7 @@ const hasPickData = computed(() =>
   margin-top: 3px;
 }
 .az1-muted { color: var(--text3) !important; }
+.az1-no-data { font-size: 15px; font-weight: 500; color: var(--text3); letter-spacing: 0; }
 .az1-right {
   display: flex;
   align-items: center;
@@ -1620,43 +1715,23 @@ const hasPickData = computed(() =>
   border-color: color-mix(in srgb, #22c55e 60%, var(--line)) !important;
 }
 
-/* ── Zone 6 Pick accuracy grid ───────────────────────────────── */
-.pick-acc-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 6px;
+/* ── Zone 6 Pick accuracy bars ────────────────────────────────── */
+.par-list { padding: 8px 14px 14px; display: flex; flex-direction: column; gap: 8px; border-bottom: var(--card-bd); }
+.par-row { display: flex; align-items: center; gap: 8px; min-height: 28px; }
+.par-label {
+  width: 52px; font-size: 11px; font-weight: 600; color: var(--text2);
+  flex-shrink: 0; display: flex; align-items: center; gap: 4px;
 }
-.pick-acc-cell {
-  background: var(--card);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 10px 10px 8px;
-  min-height: 72px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 3px;
+.par-bar-track {
+  flex: 1; height: 6px; background: var(--line); border-radius: 3px; overflow: hidden;
 }
-.pac-label {
-  font-size: 11px;
-  color: var(--text2);
-  font-weight: 600;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-.pac-val {
-  font-size: 18px;
-  font-weight: 800;
-  line-height: 1.1;
-  margin-top: 2px;
-}
-.pac-insufficient { font-size: 10px; color: var(--text3); font-weight: 500; margin-top: 4px; }
-.pac-n { font-size: 9px; color: var(--text3); }
-.pac-best {
-  border-color: color-mix(in srgb, #22c55e 60%, var(--line)) !important;
-}
+.par-bar-fill { height: 100%; border-radius: 3px; transition: width .3s ease; min-width: 2px; }
+.text-green-bar   { background: #22c55e; }
+.text-warning-bar { background: #f59e0b; }
+.text-red-bar     { background: #ef4444; }
+.muted-bar        { background: var(--line); opacity: .5; }
+.par-pct   { width: 36px; font-size: 13px; font-weight: 700; text-align: right; flex-shrink: 0; }
+.par-detail { width: 36px; font-size: 9px; color: var(--text3); text-align: right; flex-shrink: 0; }
 
 /* ── Best badge ──────────────────────────────────────────────── */
 .best-badge {
@@ -1738,6 +1813,46 @@ const hasPickData = computed(() =>
   padding: 4px 8px;
   flex-shrink: 0;
 }
+
+/* ── Zone 7 Result distribution ──────────────────────────────── */
+.rdr-strip {
+  display: flex;
+  background: var(--card);
+  border-bottom: var(--card-bd);
+}
+.rdr-cell {
+  flex: 1;
+  padding: 12px 10px 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  border-right: 1px solid var(--line);
+}
+.rdr-cell:last-child { border-right: none; }
+.rdr-label  { font-size: 10px; color: var(--text3); font-weight: 600; letter-spacing: .04em; }
+.rdr-pct    { font-size: 24px; font-weight: 800; line-height: 1; font-family: var(--font-disp); letter-spacing: -.5px; }
+.rdr-H { color: var(--primary); }
+.rdr-D { color: #f59e0b; }
+.rdr-A { color: #22c55e; }
+.rdr-bar-track { width: 100%; height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; }
+.rdr-bar        { height: 100%; border-radius: 2px; transition: width .3s ease; }
+.rdr-bar-H { background: var(--primary); }
+.rdr-bar-D { background: #f59e0b; }
+.rdr-bar-A { background: #22c55e; }
+.rdr-n { font-size: 9px; color: var(--text3); }
+
+/* ── Zone 8 ROI analysis rows ─────────────────────────────────── */
+.roi-rows { padding: 8px 14px 16px; display: flex; flex-direction: column; gap: 12px; border-bottom: var(--card-bd); }
+.roi-row  { display: flex; align-items: center; gap: 10px; }
+.roi-name { width: 52px; font-size: 11px; font-weight: 600; color: var(--text2); flex-shrink: 0; }
+.roi-bar-track { flex: 1; height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; }
+.roi-bar-fill  { height: 100%; border-radius: 4px; transition: width .3s ease; min-width: 2px; }
+.roi-pos { background: #22c55e; }
+.roi-neg { background: #ef4444; }
+.roi-right { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; min-width: 94px; flex-shrink: 0; }
+.roi-profit { font-size: 14px; font-weight: 700; line-height: 1; }
+.roi-meta   { font-size: 9px; color: var(--text3); }
 
 /* ── Scheme detail bottom sheet (Teleport'd, use :global) ────── */
 </style>
