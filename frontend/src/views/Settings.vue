@@ -13,6 +13,7 @@ interface LLMConfig {
   base_url: string | null
   is_default: boolean
   _confirmDelete?: boolean
+  _open?: boolean
 }
 
 interface DSConfig {
@@ -54,15 +55,14 @@ const ensemble = ref<EnsembleConfig>({
 interface AutoTicketConfig {
   enabled: boolean
   cron: string
-  stake: number
   sync_cron: string
 }
 const autoTicket = ref<AutoTicketConfig>({
   enabled: false,
   cron: '30 9 * * *',
-  stake: 10,
   sync_cron: '0 2 * * *',
 })
+const newProvider = ref<string>('deepseek')
 const loading = ref(true)
 const saving = ref(false)
 const testingLLM = ref<number | null>(null)
@@ -79,6 +79,16 @@ function showToast(msg: string, type: 'ok' | 'err' = 'ok') {
 
 // ── Constants ──────────────────────────────────────────────────────────────
 const PROVIDERS = ['claude', 'openai', 'gemini', 'deepseek', 'kimi', 'glm', 'custom'] as const
+
+const PROVIDER_ACCENT: Record<string, string> = {
+  claude:   'var(--red)',
+  openai:   'var(--green)',
+  gemini:   'var(--blue)',
+  deepseek: 'var(--gold)',
+  kimi:     'var(--text3)',
+  glm:      'var(--blue)',
+  custom:   'var(--text3)',
+}
 
 // 按 provider 缓存模型列表；key = provider name 或 `live-{config_id}`
 const modelLists = ref<Record<string, string[]>>({})
@@ -111,24 +121,15 @@ function modelOptions(cfg: LLMConfig): string[] {
   return modelLists.value[cfg.provider] ?? []
 }
 
-const PROVIDER_ACCENT: Record<string, string> = {
-  claude:   'var(--red)',
-  openai:   'var(--green)',
-  gemini:   'var(--blue)',
-  deepseek: 'var(--gold)',
-  kimi:     'var(--text3)',
-  glm:      'var(--blue)',
-  custom:   'var(--text3)',
-}
 
-const PROVIDER_META: Record<string, { label: string; badge: string; default_model: string; default_base_url: string }> = {
-  claude:   { label: 'Claude',   badge: 'badge-red',   default_model: 'claude-sonnet-4-6',                           default_base_url: 'https://api.anthropic.com' },
-  openai:   { label: 'OpenAI',   badge: 'badge-green', default_model: 'gpt-4o',                                      default_base_url: 'https://api.openai.com/v1' },
-  gemini:   { label: 'Gemini',   badge: 'badge-blue',  default_model: 'gemini-2.0-flash',                            default_base_url: 'https://generativelanguage.googleapis.com/v1beta/openai' },
-  deepseek: { label: 'DeepSeek', badge: 'badge-gold',  default_model: 'deepseek-chat',                               default_base_url: 'https://api.deepseek.com/v1' },
-  kimi:     { label: 'Kimi',     badge: 'badge-gray',  default_model: 'moonshot-v1-8k',                              default_base_url: 'https://api.moonshot.cn/v1' },
-  glm:      { label: 'GLM',      badge: 'badge-blue',  default_model: 'glm-4-flash',                                 default_base_url: 'https://open.bigmodel.cn/api/paas/v4' },
-  custom:   { label: '自定义',   badge: 'badge-gray',  default_model: '',                                            default_base_url: '' },
+const PROVIDER_META: Record<string, { label: string; badge: string; chip: string; default_model: string; default_base_url: string }> = {
+  claude:   { label: 'Claude',   badge: 'badge-red',   chip: 'CL',  default_model: 'claude-sonnet-4-6',  default_base_url: 'https://api.anthropic.com' },
+  openai:   { label: 'OpenAI',   badge: 'badge-green', chip: 'GPT', default_model: 'gpt-4o',             default_base_url: 'https://api.openai.com/v1' },
+  gemini:   { label: 'Gemini',   badge: 'badge-blue',  chip: 'GM',  default_model: 'gemini-2.5-flash',   default_base_url: 'https://generativelanguage.googleapis.com/v1beta/openai' },
+  deepseek: { label: 'DeepSeek', badge: 'badge-gold',  chip: 'DS',  default_model: 'deepseek-chat',      default_base_url: 'https://api.deepseek.com/v1' },
+  kimi:     { label: 'Kimi',     badge: 'badge-gray',  chip: 'KI',  default_model: 'moonshot-v1-8k',     default_base_url: 'https://api.moonshot.cn/v1' },
+  glm:      { label: 'GLM',      badge: 'badge-blue',  chip: 'GLM', default_model: 'glm-4-flash',        default_base_url: 'https://open.bigmodel.cn/api/paas/v4' },
+  custom:   { label: '自定义',   badge: 'badge-gray',  chip: '~',   default_model: '',                   default_base_url: '' },
 }
 
 // Known data sources — merge with backend data
@@ -184,25 +185,74 @@ async function load() {
 
 // ── LLM ────────────────────────────────────────────────────────────────────
 function addLLM() {
-  const meta = PROVIDER_META['deepseek']
+  const provider = newProvider.value || 'deepseek'
+  const meta = PROVIDER_META[provider]
+  llmConfigs.value.forEach(c => { c._open = false })
   llmConfigs.value.unshift({
-    name: 'DeepSeek 配置',
-    provider: 'deepseek',
-    model: meta.default_model,
+    name: `${meta?.label ?? provider} 配置`,
+    provider,
+    model: meta?.default_model ?? '',
     api_key: '',
     base_url: null,
     is_default: llmConfigs.value.length === 0,
+    _open: true,
   })
+}
+
+function toggleLLMCard(cfg: LLMConfig) {
+  const opening = !cfg._open
+  llmConfigs.value.forEach(c => { c._open = false })
+  cfg._open = opening
 }
 
 function onProviderChange(cfg: LLMConfig) {
   loadProviderModels(cfg.provider)
-  if (cfg.id) return  // 已保存配置不自动覆盖字段
   const meta = PROVIDER_META[cfg.provider]
   if (!meta) return
   cfg.model = meta.default_model
+  cfg.base_url = null  // 切换服务商时总是清空 URL，避免 Kimi URL 挂在 DeepSeek 上
+  if (!cfg.id) {
+    cfg.name = meta.label ? `${meta.label} 配置` : '新配置'
+  }
+}
+
+async function fixMismatch(cfg: LLMConfig) {
+  const model = cfg.model
+  let found = ''
+
+  // 1. 精确匹配已缓存模型列表
+  for (const [provider, models] of Object.entries(modelLists.value)) {
+    if (provider.startsWith('live-')) continue
+    if ((models as string[]).includes(model)) { found = provider; break }
+  }
+
+  // 2. 前缀启发式
+  if (!found) {
+    const m = model.toLowerCase()
+    const guessMap: [string, string][] = [
+      ['deepseek', 'deepseek'], ['moonshot', 'kimi'],
+      ['glm', 'glm'], ['chatglm', 'glm'], ['claude', 'claude'],
+      ['gemini', 'gemini'], ['gpt', 'openai'],
+      ['o1', 'openai'], ['o3', 'openai'], ['o4', 'openai'],
+    ]
+    for (const [prefix, p] of guessMap) {
+      if (m.startsWith(prefix)) { found = p; break }
+    }
+  }
+
+  if (!found) {
+    showToast('无法自动识别服务商，请手动选择', 'err')
+    return
+  }
+
+  cfg.provider = found
   cfg.base_url = null
-  cfg.name = meta.label ? `${meta.label} 配置` : '新配置'
+  loadProviderModels(found)
+
+  // 已保存的配置直接写库，防止刷新复现
+  if (cfg.id) {
+    await saveLLM(cfg)
+  }
 }
 
 function setDefault(cfg: LLMConfig) {
@@ -213,18 +263,27 @@ function setDefault(cfg: LLMConfig) {
 async function saveLLM(cfg: LLMConfig) {
   saving.value = true
   try {
+    const normalizedUrl = cfg.base_url?.trim() || null  // "" → null
     if (cfg.id) {
-      // api_key is write-only: only send when user explicitly enters a new key
       const payload: Record<string, unknown> = {
         name: cfg.name, provider: cfg.provider, model: cfg.model,
-        base_url: cfg.base_url, is_default: cfg.is_default,
+        base_url: normalizedUrl, is_default: cfg.is_default,
       }
       if (cfg._new_api_key) payload.api_key = cfg._new_api_key
       await api.put(`/settings/llm/${cfg.id}`, payload)
+      cfg.base_url = normalizedUrl
       cfg._new_api_key = ''
     } else {
-      const { data } = await api.post('/settings/llm', { ...cfg, api_key: cfg.api_key })
+      const { data } = await api.post('/settings/llm', {
+        name: cfg.name, provider: cfg.provider, model: cfg.model,
+        api_key: cfg.api_key, base_url: normalizedUrl, is_default: cfg.is_default,
+      })
       cfg.id = data.id
+      cfg.base_url = normalizedUrl
+    }
+    // Keep is_default in sync locally so other cards update without a full reload
+    if (cfg.is_default) {
+      llmConfigs.value.forEach(c => { if (c !== cfg) c.is_default = false })
     }
     showToast('LLM 配置已保存')
   } catch {
@@ -416,157 +475,149 @@ onMounted(load)
 
       <!-- ══ LLM 模型 ══════════════════════════════════════════════════════ -->
       <template v-if="activeTab === 'llm'">
-        <div class="s-section-head">
-          <span class="section-label" style="margin:0">LLM 模型配置</span>
-          <button class="btn btn-ghost btn-sm" @click="addLLM">
-            <svg width="12" height="12" viewBox="0 0 20 20" fill="currentColor">
-              <path fill-rule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" clip-rule="evenodd"/>
-            </svg>
-            添加配置
-          </button>
-        </div>
 
-        <div v-if="llmConfigs.length === 0" class="s-empty">
-          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
-          </svg>
-          <span>暂无 LLM 配置，点击「添加配置」开始</span>
-        </div>
-
-        <div
-          v-for="(cfg, i) in llmConfigs"
-          :key="i"
-          class="card s-llm-card"
-          :class="{ 's-llm-card--default': cfg.is_default }"
-          :style="{ '--s-accent': PROVIDER_ACCENT[cfg.provider] ?? 'var(--text3)' }"
-        >
-          <!-- Card head -->
-          <div class="s-llm-head" :class="{ 's-llm-head--default': cfg.is_default }">
-            <span :class="['badge', PROVIDER_META[cfg.provider]?.badge ?? 'badge-gray']" style="flex-shrink:0;font-size:11px">
-              {{ PROVIDER_META[cfg.provider]?.label ?? cfg.provider }}
-            </span>
-            <input v-model="cfg.name" class="s-name-input" placeholder="配置名称" />
-            <button
-              v-if="!cfg.is_default"
-              class="s-default-btn"
-              title="点击设为默认模型"
-              @click="setDefault(cfg)"
-            >
-              <svg width="11" height="11" viewBox="0 0 20 20" fill="currentColor"><path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z"/></svg>
-              设默认
+        <!-- toolbar -->
+        <div class="lc-bar">
+          <div class="lc-bar-l">
+            <span class="lc-title">模型配置</span>
+            <span v-if="llmConfigs.length" class="lc-count">{{ llmConfigs.length }}</span>
+          </div>
+          <div class="lc-bar-r">
+            <select v-model="newProvider" class="lc-pick">
+              <option v-for="p in PROVIDERS" :key="p" :value="p">{{ PROVIDER_META[p]?.label ?? p }}</option>
+            </select>
+            <button class="lc-add" @click="addLLM">
+              <svg width="11" height="11" viewBox="0 0 20 20" fill="currentColor">
+                <path fill-rule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" clip-rule="evenodd"/>
+              </svg>
+              添加
             </button>
-            <span v-else class="s-default-indicator" title="当前默认模型">
-              <svg width="12" height="12" viewBox="0 0 20 20" fill="currentColor"><path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z"/></svg>
-              默认
-            </span>
-          </div>
-
-          <!-- Fields -->
-          <div class="s-llm-grid">
-            <div class="field">
-              <label class="field-label">服务商</label>
-              <select v-model="cfg.provider" class="input" @change="onProviderChange(cfg)">
-                <option v-for="p in PROVIDERS" :key="p" :value="p">
-                  {{ PROVIDER_META[p]?.label ?? p }}
-                </option>
-              </select>
-            </div>
-            <div class="field">
-              <label class="field-label">
-                模型
-                <button
-                  v-if="cfg.id"
-                  class="s-refresh-btn"
-                  :disabled="refreshingModels === cfg.id"
-                  :title="refreshingModels === cfg.id ? '获取中…' : '从 Provider 获取最新模型列表'"
-                  @click.prevent="refreshLiveModels(cfg)"
-                >
-                  <svg :class="{ 's-spin': refreshingModels === cfg.id }" width="11" height="11" viewBox="0 0 20 20" fill="currentColor">
-                    <path fill-rule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clip-rule="evenodd"/>
-                  </svg>
-                  {{ modelLists['live-' + cfg.id] ? modelLists['live-' + cfg.id].length + ' 个' : '刷新' }}
-                </button>
-              </label>
-              <input
-                v-model="cfg.model"
-                class="input"
-                :list="`model-list-${i}`"
-                :placeholder="PROVIDER_META[cfg.provider]?.default_model || 'model-name'"
-                autocomplete="off"
-              />
-              <datalist :id="`model-list-${i}`">
-                <option v-for="m in modelOptions(cfg)" :key="m" :value="m" />
-              </datalist>
-            </div>
-            <div class="field" style="grid-column:1/-1">
-              <label class="field-label">
-                API Key
-                <span v-if="cfg.id" style="font-weight:400;text-transform:none;letter-spacing:0">(已配置，留空不变)</span>
-              </label>
-              <input
-                v-if="cfg.id"
-                v-model="cfg._new_api_key"
-                class="input" type="password"
-                placeholder="粘贴新 Key 以替换…"
-              />
-              <input
-                v-else
-                v-model="cfg.api_key"
-                class="input" type="password"
-                placeholder="sk-…"
-              />
-            </div>
-            <div class="field" style="grid-column:1/-1">
-              <label class="field-label">Base URL <span style="font-weight:400;text-transform:none;letter-spacing:0">(可选，留空使用默认)</span></label>
-              <input
-                v-model="cfg.base_url"
-                class="input"
-                :placeholder="cfg.provider === 'custom' ? 'https://your-api.com/v1' : (PROVIDER_META[cfg.provider]?.default_base_url || '使用内置默认地址')"
-              />
-            </div>
-          </div>
-
-          <!-- Card foot -->
-          <div class="s-llm-foot" :class="{ 's-llm-foot--danger': cfg._confirmDelete }">
-            <template v-if="cfg._confirmDelete">
-              <span class="s-del-warn">确认删除此配置？此操作不可撤销</span>
-              <div class="flex gap-2" style="margin-left:auto">
-                <button class="btn btn-ghost btn-sm" @click="cfg._confirmDelete = false">取消</button>
-                <button class="btn btn-sm s-del-confirm-btn" @click="deleteLLM(cfg, i)">确认删除</button>
-              </div>
-            </template>
-            <template v-else>
-              <span
-                v-if="cfg.id && llmResult[cfg.id]"
-                class="s-test-result"
-                :class="llmResult[cfg.id].ok ? 'ok' : 'err'"
-              >
-                <svg v-if="llmResult[cfg.id].ok" width="11" height="11" viewBox="0 0 20 20" fill="currentColor" style="flex-shrink:0"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/></svg>
-                <svg v-else width="11" height="11" viewBox="0 0 20 20" fill="currentColor" style="flex-shrink:0"><path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clip-rule="evenodd"/></svg>
-                {{ llmResult[cfg.id].msg }}
-              </span>
-              <div class="flex gap-2" style="margin-left:auto">
-                <button
-                  v-if="cfg.id"
-                  class="btn btn-ghost btn-sm"
-                  :disabled="testingLLM === cfg.id"
-                  @click="testLLM(cfg)"
-                >
-                  <svg width="12" height="12" viewBox="0 0 20 20" fill="currentColor">
-                    <path fill-rule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clip-rule="evenodd"/>
-                  </svg>
-                  {{ testingLLM === cfg.id ? '测试中…' : '测试' }}
-                </button>
-                <button class="btn btn-primary btn-sm" :disabled="saving" @click="saveLLM(cfg)">保存</button>
-                <button class="btn btn-ghost btn-sm s-del-btn" title="删除此配置" @click="confirmDeleteLLM(cfg)">
-                  <svg width="13" height="13" viewBox="0 0 20 20" fill="currentColor">
-                    <path fill-rule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd"/>
-                  </svg>
-                </button>
-              </div>
-            </template>
           </div>
         </div>
+
+        <!-- empty state -->
+        <div v-if="llmConfigs.length === 0" class="lc-empty">
+          <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>
+          </svg>
+          <div>暂无 LLM 配置</div>
+          <div class="lc-empty-sub">在上方选择服务商后点击「添加」</div>
+        </div>
+
+        <!-- config cards -->
+        <div
+          v-for="(cfg, i) in llmConfigs" :key="i"
+          class="lc-card"
+          :class="{ 'lc-card--default': cfg.is_default, 'lc-card--open': cfg._open }"
+          :style="`--pa: ${PROVIDER_ACCENT[cfg.provider] ?? 'var(--text3)'}`"
+        >
+          <!-- card header (clickable, toggles expand) -->
+          <div class="lc-head lc-head--btn" @click="toggleLLMCard(cfg)">
+            <div class="lc-chip">{{ PROVIDER_META[cfg.provider]?.chip ?? cfg.provider.slice(0, 2).toUpperCase() }}</div>
+            <div class="lc-meta">
+              <span class="lc-pname">{{ cfg.name || '未命名' }}</span>
+              <code class="lc-mslug">{{ cfg.model || '—' }}</code>
+            </div>
+            <div class="lc-tags">
+              <template v-if="cfg.model && modelOptions(cfg).length > 0 && !modelOptions(cfg).includes(cfg.model)">
+                <span class="lc-tag lc-tag--gold">⚠ 不匹配</span>
+                <button class="lc-fix-btn" @click.stop="fixMismatch(cfg)">修复</button>
+              </template>
+              <span v-if="cfg.id && llmResult[cfg.id]" class="lc-tag"
+                :class="llmResult[cfg.id].ok ? 'lc-tag--ok' : 'lc-tag--err'">
+                {{ llmResult[cfg.id].ok ? '✓ 连通' : '✗ 失败' }}
+              </span>
+              <span v-if="cfg.is_default" class="lc-tag lc-tag--gold">★ 默认</span>
+            </div>
+            <svg class="lc-chevron" :class="{ open: cfg._open }" width="14" height="14" viewBox="0 0 20 20" fill="currentColor">
+              <path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd"/>
+            </svg>
+          </div>
+
+          <!-- collapsible body -->
+          <transition name="lc-body">
+            <div v-show="cfg._open" class="lc-body">
+              <!-- form -->
+              <div class="lc-form">
+                <div class="lc-field">
+                  <label class="lc-lbl">配置名称</label>
+                  <input v-model="cfg.name" class="lc-inp" placeholder="如：My DeepSeek" />
+                </div>
+                <div class="lc-g2">
+                  <div class="lc-field">
+                    <label class="lc-lbl">服务商</label>
+                    <select v-model="cfg.provider" class="lc-inp lc-sel" @change="onProviderChange(cfg)">
+                      <option v-for="p in PROVIDERS" :key="p" :value="p">{{ PROVIDER_META[p]?.label ?? p }}</option>
+                    </select>
+                  </div>
+                  <div class="lc-field">
+                    <div class="lc-lbl-row">
+                      <label class="lc-lbl">模型</label>
+                      <button v-if="cfg.id" class="lc-refresh" :disabled="refreshingModels === cfg.id"
+                        @click.prevent="refreshLiveModels(cfg)">
+                        <svg :style="refreshingModels === cfg.id ? 'animation:lc-rotate .7s linear infinite' : ''"
+                          width="10" height="10" viewBox="0 0 20 20" fill="currentColor">
+                          <path fill-rule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clip-rule="evenodd"/>
+                        </svg>
+                        {{ modelLists['live-' + cfg.id] ? modelLists['live-' + cfg.id].length + ' 个' : '刷新' }}
+                      </button>
+                    </div>
+                    <select v-if="modelOptions(cfg).length > 0" v-model="cfg.model" class="lc-inp lc-sel">
+                      <option v-if="cfg.model && !modelOptions(cfg).includes(cfg.model)" :value="cfg.model">{{ cfg.model }}</option>
+                      <option v-for="m in modelOptions(cfg)" :key="m" :value="m">{{ m }}</option>
+                    </select>
+                    <input v-else v-model="cfg.model" class="lc-inp lc-mono"
+                      :placeholder="PROVIDER_META[cfg.provider]?.default_model || 'model-id'" />
+                  </div>
+                </div>
+                <div class="lc-field">
+                  <label class="lc-lbl">API Key
+                    <span v-if="cfg.id" class="lc-hint">· 已配置，留空不变</span>
+                  </label>
+                  <input v-if="cfg.id" v-model="cfg._new_api_key" class="lc-inp lc-mono" type="password"
+                    placeholder="粘贴新 Key 以替换当前值…" />
+                  <input v-else v-model="cfg.api_key" class="lc-inp lc-mono" type="password" placeholder="sk-…" />
+                </div>
+                <div class="lc-field" style="margin-bottom:0">
+                  <label class="lc-lbl">Base URL
+                    <span class="lc-hint">· 可选，留空使用内置默认</span>
+                  </label>
+                  <input v-model="cfg.base_url" class="lc-inp lc-mono"
+                    :placeholder="cfg.provider === 'custom' ? 'https://your-api.com/v1' : (PROVIDER_META[cfg.provider]?.default_base_url || '内置默认')" />
+                </div>
+              </div>
+
+              <!-- footer -->
+              <div class="lc-foot" :class="{ 'lc-foot--danger': cfg._confirmDelete }">
+                <template v-if="cfg._confirmDelete">
+                  <span class="lc-del-warn">确认删除此配置？操作不可撤销</span>
+                  <div class="lc-foot-r">
+                    <button class="lc-btn-ghost" @click="cfg._confirmDelete = false">取消</button>
+                    <button class="lc-btn-danger" @click="deleteLLM(cfg, i)">确认删除</button>
+                  </div>
+                </template>
+                <template v-else>
+                  <span v-if="cfg.id && llmResult[cfg.id]" class="lc-result"
+                    :class="llmResult[cfg.id].ok ? 'ok' : 'err'">{{ llmResult[cfg.id].msg }}</span>
+                  <span v-else style="flex:1"></span>
+                  <div class="lc-foot-r">
+                    <button v-if="!cfg.is_default" class="lc-btn-text" @click="setDefault(cfg)">设为默认</button>
+                    <button v-if="cfg.id" class="lc-btn-ghost" :disabled="testingLLM === cfg.id" @click="testLLM(cfg)">
+                      {{ testingLLM === cfg.id ? '测试中…' : '测试' }}
+                    </button>
+                    <button class="lc-btn-primary" :disabled="saving" @click="saveLLM(cfg)">保存</button>
+                    <button class="lc-btn-del" @click="confirmDeleteLLM(cfg)" title="删除">
+                      <svg width="13" height="13" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd"/>
+                      </svg>
+                    </button>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </transition>
+        </div>
+
       </template>
 
       <!-- ══ 数据源 ══════════════════════════════════════════════════════════ -->
@@ -787,57 +838,48 @@ onMounted(load)
 
       <!-- ══ 自动出票 ════════════════════════════════════════════════════════ -->
       <template v-if="activeTab === 'auto_ticket'">
-        <div class="s-card s-card--form">
-          <div class="s-section-head">
-            <span class="section-label" style="margin:0">自动出票配置</span>
+        <div class="card no-accent at-card">
+
+          <!-- 开关行 -->
+          <div class="at-row at-row--toggle">
+            <div class="at-meta">
+              <span class="at-title">启用自动出票</span>
+              <span class="at-desc">每日定时生成投注方案，在「追踪」页查看历史记录</span>
+            </div>
+            <label class="s-toggle">
+              <input type="checkbox" v-model="autoTicket.enabled" />
+              <span class="s-toggle-track"><span class="s-toggle-thumb" /></span>
+            </label>
           </div>
-          <div class="s-form-body">
 
-            <!-- 开关 -->
-            <div class="s-row">
-              <label class="s-label">
-                启用自动出票
-                <span class="s-hint">系统每日定时自动生成投注方案，在战绩页查看历史</span>
-              </label>
-              <label class="s-toggle">
-                <input type="checkbox" v-model="autoTicket.enabled" />
-                <span class="s-toggle-track" />
-              </label>
-            </div>
+          <div class="at-divider" />
 
-            <!-- 出票时间 -->
-            <div class="s-row">
-              <label class="s-label">
-                每日出票时间
-                <span class="s-hint">建议在 AI 分析完成（09:00）后，如 09:30</span>
-              </label>
-              <input class="input input--time" type="time" v-model="ticketTime" />
+          <!-- 出票时间 -->
+          <div class="at-row">
+            <div class="at-meta">
+              <span class="at-title">每日出票时间</span>
+              <span class="at-desc">建议 AI 分析完成（09:00）后，默认 09:30</span>
             </div>
-
-            <!-- 参考金额 -->
-            <div class="s-row">
-              <label class="s-label">
-                参考投注额（¥）
-                <span class="s-hint">每份方案的模拟金额，用于战绩页盈亏计算，不实际扣款</span>
-              </label>
-              <input class="input" type="number" v-model.number="autoTicket.stake" min="1" step="5" style="max-width:100px" />
-            </div>
-
-            <!-- 赛果同步时间 -->
-            <div class="s-row">
-              <label class="s-label">
-                赛果同步时间
-                <span class="s-hint">凌晨批量同步前日赛果，建议 02:00（比赛结束后）</span>
-              </label>
-              <input class="input input--time" type="time" v-model="syncTime" />
-            </div>
-
-            <div class="s-hint-block">
-              修改时间配置后需重启后端 worker 服务生效。也可在「战绩」页点击「立即出票」手动触发。
-            </div>
+            <input class="input at-time-input" type="time" v-model="ticketTime" :disabled="!autoTicket.enabled" />
           </div>
-          <div class="s-form-foot">
-            <button class="btn btn-primary btn-sm" :disabled="saving" @click="saveAutoTicket" style="margin-left:auto">保存配置</button>
+
+          <!-- 赛果同步时间 -->
+          <div class="at-row">
+            <div class="at-meta">
+              <span class="at-title">赛果同步时间</span>
+              <span class="at-desc">批量同步前日赛果，建议赛事结束后，默认 02:00</span>
+            </div>
+            <input class="input at-time-input" type="time" v-model="syncTime" :disabled="!autoTicket.enabled" />
+          </div>
+
+          <div class="at-divider" />
+
+          <!-- 提示 + 保存 -->
+          <div class="at-foot">
+            <span class="at-foot-hint">修改后需重启 worker 服务生效</span>
+            <button class="btn btn-primary btn-sm" :disabled="saving" @click="saveAutoTicket">
+              {{ saving ? '保存中…' : '保存配置' }}
+            </button>
           </div>
         </div>
       </template>
@@ -848,9 +890,53 @@ onMounted(load)
 
 <style scoped>
 /* ── Layout ──────────────────────────────────────────────────────────────── */
-.view { display: flex; flex-direction: column; height: 100%; }
+.view { display: flex; flex-direction: column; }
 .input--time { max-width: 130px; }
 .s-hint-block { font-size: 11px; color: var(--text3); line-height: 1.5; padding: 8px 12px; background: color-mix(in srgb, var(--primary) 4%, var(--card)); border-radius: 6px; }
+
+/* ── 自动出票配置卡 ───────────────────────────────────────────────────────── */
+.at-card { padding: 0; overflow: hidden; }
+.at-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+}
+.at-row--toggle { padding: 16px; }
+.at-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+}
+.at-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text1);
+  white-space: nowrap;
+}
+.at-desc {
+  font-size: 11px;
+  color: var(--text3);
+  line-height: 1.4;
+}
+.at-time-input {
+  width: 110px;
+  flex-shrink: 0;
+  text-align: center;
+}
+.at-time-input:disabled { opacity: .4; }
+.at-divider { height: 1px; background: var(--line, rgba(255,255,255,.07)); margin: 0; }
+.at-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  gap: 8px;
+}
+.at-foot-hint { font-size: 11px; color: var(--text3); }
 
 
 /* ── Tabs ────────────────────────────────────────────────────────────────── */
@@ -862,6 +948,9 @@ onMounted(load)
   flex-shrink: 0;
   padding: 0 16px;
   overflow-x: auto;
+  position: sticky;
+  top: 0;
+  z-index: 10;
 }
 .s-tab {
   padding: 10px 16px;
@@ -883,7 +972,7 @@ onMounted(load)
 .s-tab.active { color: var(--primary); border-bottom-color: var(--primary); }
 
 /* ── Body ────────────────────────────────────────────────────────────────── */
-.s-body { padding: 14px 16px; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 8px; }
+.s-body { padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; }
 
 /* ── Section head ────────────────────────────────────────────────────────── */
 .s-section-head {
@@ -893,105 +982,432 @@ onMounted(load)
   margin-bottom: 4px;
 }
 
-/* ── LLM card ────────────────────────────────────────────────────────────── */
-.s-llm-card { margin: 0; }
-.s-llm-card::before { background: var(--s-accent, var(--line)); }
-.s-llm-card:hover::before { background: var(--s-accent, var(--primary)); }
+/* ── LLM Config (lc-*) ──────────────────────────────────────────────────── */
 
-.s-llm-head {
+/* Toolbar */
+.lc-bar {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 10px 14px 9px;
-  border-bottom: var(--card-bd);
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 2px 12px;
 }
-.s-llm-head--default {
-  background: linear-gradient(90deg, var(--primary-d), transparent 60%);
+.lc-bar-l { display: flex; align-items: center; gap: 8px; }
+.lc-title {
+  font-family: var(--font-disp);
+  font-size: 14px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .6px;
+  color: var(--text2);
 }
-.s-default-indicator {
+.lc-count {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--primary-t);
+  color: var(--primary);
+  font-family: var(--font-num);
   font-size: 10px;
-  font-weight: 600;
-  color: var(--gold);
-  flex-shrink: 0;
-  white-space: nowrap;
+  font-weight: 700;
 }
-.s-name-input {
-  flex: 1;
-  font-size: 13px;
+.lc-bar-r { display: flex; align-items: center; gap: 7px; }
+.lc-pick {
+  appearance: none;
+  background: var(--card);
+  border: var(--card-bd);
+  border-radius: var(--radius-sm);
+  color: var(--text2);
+  cursor: pointer;
+  font-family: var(--font-disp);
+  font-size: 11px;
   font-weight: 600;
-  color: var(--text);
-  background: transparent;
-  border: none;
-  border-bottom: 1px solid var(--line-dash);
-  padding: 0 0 1px;
+  text-transform: uppercase;
+  letter-spacing: .3px;
+  padding: 6px 26px 6px 10px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 20 20' fill='%23999'%3E%3Cpath fill-rule='evenodd' d='M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 7px center;
   outline: none;
   transition: border-color .15s;
-  min-width: 0;
 }
-.s-name-input:hover { border-bottom-color: var(--line); }
-.s-name-input:focus { border-bottom-color: var(--primary); }
-.s-default-btn {
+.lc-pick:focus { border-color: var(--primary); }
+.lc-add {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
-  font-size: 10px;
-  color: var(--text3);
-  padding: 2px 7px;
-  border: var(--card-bd);
-  border-radius: var(--radius-pill);
+  gap: 4px;
+  padding: 6px 13px;
+  border-radius: var(--radius-sm);
+  background: var(--primary);
+  color: #fff;
+  font-family: var(--font-disp);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .4px;
   cursor: pointer;
-  background: transparent;
-  transition: color .15s, border-color .15s;
-  flex-shrink: 0;
+  border: none;
+  transition: opacity .15s, transform .1s;
   white-space: nowrap;
 }
-.s-default-btn:hover { color: var(--gold); border-color: var(--gold); }
+.lc-add:hover { opacity: .88; }
+.lc-add:active { transform: scale(0.97); }
 
-.s-llm-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 0 10px;
-  padding: 10px 14px 0;
-}
-@media (max-width: 480px) { .s-llm-grid { grid-template-columns: 1fr; } }
-
-.s-llm-foot {
-  display: flex;
-  align-items: center;
-  padding: 8px 14px;
-  border-top: var(--card-bd);
-  background: var(--bg);
-  gap: 8px;
-}
-.s-test-result {
-  font-size: 11px;
-  font-weight: 500;
-}
-.s-test-result.ok { color: var(--green); }
-.s-test-result.err { color: var(--primary); }
-
-.s-del-btn { color: var(--text3); border-color: transparent; padding: 5px 7px; }
-.s-del-btn:hover { color: var(--primary); border-color: var(--primary); }
-/* Danger state for delete confirmation — full-width, red tint */
-.s-llm-foot--danger { background: var(--win-bg); }
-.s-del-warn { font-size: 11px; color: var(--primary); font-weight: 600; }
-.s-del-confirm-btn { padding: 5px 10px; font-size: 11px; font-family: var(--font-disp); font-weight: 600; text-transform: uppercase; letter-spacing: .4px; background: var(--primary); color: #fff; border-radius: var(--radius-sm); cursor: pointer; }
-.s-del-confirm-btn:hover { opacity: .85; }
-
-/* ── Empty state ─────────────────────────────────────────────────────────── */
-.s-empty {
+/* Empty state */
+.lc-empty {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 10px;
-  padding: 36px 20px;
+  gap: 8px;
+  padding: 40px 20px;
   color: var(--text3);
   font-size: 13px;
   text-align: center;
 }
+.lc-empty-sub { font-size: 11px; color: var(--text3); opacity: .7; }
+
+/* Card */
+.lc-card {
+  background: var(--card);
+  border: var(--card-bd);
+  border-left: 3px solid var(--pa, var(--line));
+  border-radius: var(--radius);
+  overflow: hidden;
+  transition: box-shadow .15s;
+}
+.lc-card::before { display: none; }
+.lc-card--default {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--pa, var(--primary)) 30%, transparent);
+}
+.lc-card:hover { box-shadow: 0 4px 14px rgba(0,0,0,.09); }
+
+/* Card header */
+.lc-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: color-mix(in srgb, var(--pa, var(--primary)) 5%, var(--card));
+  border-bottom: var(--card-bd);
+}
+.lc-chip {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  background: var(--pa, var(--text3));
+  color: #fff;
+  font-family: var(--font-disp);
+  font-size: 13px;
+  font-weight: 800;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  letter-spacing: -0.5px;
+  text-shadow: 0 1px 3px rgba(0,0,0,.25);
+}
+.lc-meta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.lc-pname {
+  font-family: var(--font-disp);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.lc-mslug {
+  font-family: var(--font-num);
+  font-size: 11px;
+  color: var(--text3);
+  letter-spacing: .2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-style: normal;
+}
+.lc-tags { display: flex; align-items: center; gap: 5px; flex-shrink: 0; }
+.lc-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 7px;
+  border-radius: var(--radius-pill);
+  font-family: var(--font-disp);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .6px;
+  text-transform: uppercase;
+  border: 1px solid;
+  white-space: nowrap;
+}
+.lc-tag--ok {
+  color: var(--green);
+  border-color: color-mix(in srgb, var(--green) 35%, transparent);
+  background: color-mix(in srgb, var(--green) 8%, transparent);
+}
+.lc-tag--err {
+  color: var(--red);
+  border-color: color-mix(in srgb, var(--red) 35%, transparent);
+  background: color-mix(in srgb, var(--red) 8%, transparent);
+}
+.lc-tag--gold {
+  color: var(--gold);
+  border-color: color-mix(in srgb, var(--gold) 35%, transparent);
+  background: color-mix(in srgb, var(--gold) 8%, transparent);
+}
+
+.lc-fix-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: var(--radius-pill);
+  font-family: var(--font-disp);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .6px;
+  text-transform: uppercase;
+  border: 1px solid color-mix(in srgb, var(--primary) 40%, transparent);
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+  color: var(--primary);
+  cursor: pointer;
+  transition: background .12s, border-color .12s;
+  white-space: nowrap;
+}
+.lc-fix-btn:hover {
+  background: color-mix(in srgb, var(--primary) 18%, transparent);
+  border-color: var(--primary);
+}
+
+/* Accordion */
+.lc-head--btn { cursor: pointer; user-select: none; }
+.lc-head--btn:hover {
+  background: color-mix(in srgb, var(--pa, var(--primary)) 9%, var(--card));
+}
+.lc-card--open > .lc-head--btn {
+  background: color-mix(in srgb, var(--pa, var(--primary)) 7%, var(--card));
+}
+.lc-chevron { color: var(--text3); flex-shrink: 0; transition: transform .2s; margin-left: 4px; }
+.lc-chevron.open { transform: rotate(180deg); }
+.lc-body { }
+.lc-body-enter-active { transition: opacity .2s ease, transform .18s ease; }
+.lc-body-leave-active { transition: opacity .14s ease, transform .12s ease; }
+.lc-body-enter-from, .lc-body-leave-to { opacity: 0; transform: translateY(-6px); }
+
+/* Form */
+.lc-form {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.lc-field { display: flex; flex-direction: column; gap: 4px; }
+.lc-g2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+@media (max-width: 480px) { .lc-g2 { grid-template-columns: 1fr; } }
+
+.lc-lbl-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.lc-lbl {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-disp), var(--font);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: var(--text3);
+}
+.lc-hint {
+  font-size: 9px;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text3);
+  opacity: .7;
+}
+.lc-inp {
+  width: 100%;
+  padding: 7px 10px;
+  border: var(--card-bd);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  outline: none;
+  transition: border-color .15s;
+  min-width: 0;
+}
+.lc-inp:focus { border-color: var(--pa, var(--primary)); }
+.lc-inp::placeholder { color: var(--text3); font-size: 11px; }
+.lc-mono { font-family: var(--font-num); font-size: 12px; letter-spacing: .2px; }
+.lc-sel {
+  appearance: none;
+  cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 20 20' fill='%23999'%3E%3Cpath fill-rule='evenodd' d='M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  padding-right: 26px;
+}
+.lc-refresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-family: var(--font-disp);
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .4px;
+  color: var(--text3);
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  background: transparent;
+  transition: color .12s, border-color .12s;
+}
+.lc-refresh:hover { color: var(--primary); border-color: var(--primary); }
+.lc-refresh:disabled { opacity: .4; cursor: not-allowed; }
+@keyframes lc-rotate { to { transform: rotate(360deg); } }
+.lc-spin { animation: lc-rotate .7s linear infinite; }
+
+/* Footer */
+.lc-foot {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 12px;
+  border-top: var(--card-bd);
+  background: var(--bg);
+  min-height: 42px;
+}
+.lc-foot--danger { background: var(--win-bg); }
+.lc-foot-r { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+.lc-result {
+  font-family: var(--font-num);
+  font-size: 11px;
+  font-weight: 500;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lc-result.ok { color: var(--green); }
+.lc-result.err { color: var(--red); }
+.lc-del-warn { font-size: 11px; color: var(--red); font-weight: 600; flex: 1; }
+
+/* Buttons */
+.lc-btn-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text3);
+  font-family: var(--font-disp);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .4px;
+  cursor: pointer;
+  border: none;
+  transition: color .12s;
+  white-space: nowrap;
+}
+.lc-btn-text:hover { color: var(--gold); }
+.lc-btn-ghost {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 12px;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text2);
+  font-family: var(--font-disp);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .4px;
+  cursor: pointer;
+  border: var(--card-bd);
+  transition: border-color .15s, color .15s, transform .1s;
+  white-space: nowrap;
+}
+.lc-btn-ghost:hover { border-color: var(--primary); color: var(--primary); }
+.lc-btn-ghost:active { transform: scale(0.97); }
+.lc-btn-ghost:disabled { opacity: .4; cursor: not-allowed; }
+.lc-btn-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--primary);
+  color: #fff;
+  font-family: var(--font-disp);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .4px;
+  cursor: pointer;
+  border: none;
+  transition: opacity .15s, transform .1s;
+  white-space: nowrap;
+}
+.lc-btn-primary:hover { opacity: .88; }
+.lc-btn-primary:active { transform: scale(0.97); }
+.lc-btn-primary:disabled { opacity: .4; cursor: not-allowed; }
+.lc-btn-danger {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--red);
+  color: #fff;
+  font-family: var(--font-disp);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .4px;
+  cursor: pointer;
+  border: none;
+  transition: opacity .15s;
+  white-space: nowrap;
+}
+.lc-btn-danger:hover { opacity: .85; }
+.lc-btn-del {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 29px;
+  height: 29px;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text3);
+  border: var(--card-bd);
+  cursor: pointer;
+  transition: color .15s, border-color .15s;
+  flex-shrink: 0;
+}
+.lc-btn-del:hover { color: var(--red); border-color: var(--red); }
 
 /* ── Data source card ────────────────────────────────────────────────────── */
 .s-ds-card { margin: 0; }

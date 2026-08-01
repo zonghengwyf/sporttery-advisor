@@ -7,11 +7,11 @@ const router = useRouter()
 const route = useRoute()
 const auth = useAuthStore()
 
-// 导航项（移动端与 PC 完全一致，5 项）
+// 导航项（移动端与 PC 完全一致，5 项；方案在第3位居中凸显）
 const nav = [
   { path: '/analysis', label: '赛事' },
-  { path: '/tickets',  label: '方案', featured: true },
   { path: '/records',  label: '战绩' },
+  { path: '/tickets',  label: '方案', featured: true },
   { path: '/backtest', label: '回测' },
   { path: '/settings', label: '设置' },
 ]

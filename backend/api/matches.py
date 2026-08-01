@@ -95,9 +95,9 @@ async def set_match_result(
     match_id: int,
     body: ResultIn,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(get_current_user),
 ):
-    """录入比赛实际结果（H/D/A），同步写入 Match 和 DuckDB 回测记录。仅管理员可操作。"""
+    """录入比赛实际结果（H/D/A），同步写入 Match 和 DuckDB 回测记录。"""
     if body.actual_result not in ("H", "D", "A"):
         raise HTTPException(status_code=400, detail="actual_result 须为 H / D / A")
 

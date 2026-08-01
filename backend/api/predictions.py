@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime, timezone, timedelta
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel, field_validator
@@ -34,6 +35,36 @@ class PredictionOut(BaseModel):
     @classmethod
     def coerce_created_at(cls, v):
         return str(v) if v is not None else None
+
+
+@router.get("/analysis-status")
+async def get_analysis_status(
+    match_ids: str = Query(default="", description="逗号分隔的 match_id 列表，空则查询全部今日"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """返回今日（北京时间）最早的 Prediction 创建时间，用于前端显示分析新鲜度。"""
+    # 今日北京时间 00:00 转 UTC
+    cst = timezone(timedelta(hours=8))
+    now_cst = datetime.now(cst)
+    today_start_cst = now_cst.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start_utc = today_start_cst.astimezone(timezone.utc).replace(tzinfo=None)
+
+    try:
+        stmt = select(func.min(Prediction.created_at)).where(
+            Prediction.created_at >= today_start_utc
+        )
+        if match_ids:
+            ids = [int(x) for x in match_ids.split(",") if x.strip().isdigit()]
+            if ids:
+                stmt = stmt.where(Prediction.match_id.in_(ids))
+        result = await db.execute(stmt)
+        earliest = result.scalar_one_or_none()
+        if earliest is None:
+            return {"latest_at": None}
+        return {"latest_at": earliest.isoformat()}
+    except Exception:
+        return {"latest_at": None}
 
 
 @router.get("/batch")

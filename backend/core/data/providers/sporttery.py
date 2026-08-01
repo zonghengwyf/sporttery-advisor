@@ -73,6 +73,88 @@ def _parse_markets(item: dict[str, Any]) -> list[str]:
     return [pool for pool in POOL_CODES if pool in item and item[pool]]
 
 
+# 竞彩赛果编码映射（matchResult 字段值 → H/D/A）
+_RESULT_CODE_MAP: dict[str, str] = {
+    "1": "H", "胜": "H",
+    "0": "D", "平": "D",
+    "3": "A", "负": "A",
+}
+
+
+def _parse_result(item: dict[str, Any]) -> tuple[str | None, str | None]:
+    """从 API 响应项提取赛果和比分。返回 (H/D/A | None, "2-1" | None)。"""
+    result_code: str | None = None
+    score: str | None = None
+
+    # matchResult 字段
+    mr = str(item.get("matchResult") or "").strip()
+    result_code = _RESULT_CODE_MAP.get(mr)
+
+    # homeScore / awayScore 字段
+    try:
+        hs = item.get("homeScore")
+        as_ = item.get("awayScore")
+        if hs is not None and as_ is not None:
+            h_int, a_int = int(hs), int(as_)
+            score = f"{h_int}-{a_int}"
+            if result_code is None:
+                if h_int > a_int:
+                    result_code = "H"
+                elif h_int < a_int:
+                    result_code = "A"
+                else:
+                    result_code = "D"
+    except (TypeError, ValueError):
+        pass
+
+    return result_code, score
+
+
+def _fetch_raw_items() -> list[dict]:
+    """拉取竞彩官方接口全量数据项（不按日期过滤）。在 asyncio.to_thread 中调用。"""
+    url = OFFICIAL_URL + "?poolCode=had,hhad,crs,ttg,hafu&channel=c"
+    headers = {
+        "User-Agent": _UA,
+        "Referer": "https://m.sporttery.cn/",
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Accept": "application/json",
+    }
+    req = urllib.request.Request(url, headers=headers)
+    payload: dict | None = None
+    last_err: Exception | None = None
+    for no_proxy in (False, True):
+        try:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({})) if no_proxy else None
+            ctx = opener.open(req, timeout=15) if opener else urllib.request.urlopen(req, timeout=15)
+            with ctx as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+            break
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            last_err = exc
+    if payload is None:
+        raise ProviderError(f"竞彩官方接口不可达：{last_err}")
+    groups = (payload.get("value") or {}).get("matchInfoList")
+    if not isinstance(groups, list):
+        raise ProviderError("竞彩官方响应结构已变化（缺少 value.matchInfoList）")
+    items: list[dict] = []
+    for group in groups:
+        for item in group.get("subMatchList") or []:
+            items.append(item)
+    return items
+
+
+def fetch_result_by_id(sporttery_id: str) -> tuple[str | None, str | None]:
+    """按 sporttery_id 查询赛果，返回 (H/D/A | None, score | None)。在 asyncio.to_thread 中调用。"""
+    try:
+        items = _fetch_raw_items()
+    except ProviderError:
+        return None, None
+    for item in items:
+        if str(item.get("matchId") or "") == sporttery_id:
+            return _parse_result(item)
+    return None, None
+
+
 def fetch_today(business_date: date) -> list[dict]:
     """同步拉取竞彩官方赛单，返回标准化字典列表。在 asyncio.to_thread 中调用。"""
     url = (
@@ -117,6 +199,7 @@ def fetch_today(business_date: date) -> list[dict]:
             )
             if item_date != target and group_date != target:
                 continue
+            actual_result, actual_score = _parse_result(item)
             result.append({
                 "sporttery_id": str(item.get("matchId") or ""),
                 "match_no": str(item.get("matchNumStr") or ""),
@@ -131,5 +214,7 @@ def fetch_today(business_date: date) -> list[dict]:
                 "sporttery_odds": _parse_had_odds(item),
                 "hhad_odds": _parse_hhad_odds(item),
                 "available_markets": _parse_markets(item),
+                "actual_result": actual_result,
+                "actual_score": actual_score,
             })
     return result

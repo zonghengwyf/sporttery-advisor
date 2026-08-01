@@ -4,18 +4,66 @@
 
 Use /browse from gstack for all web browsing. Never use mcp__claude-in-chrome__* tools.
 
-Available skills: /office-hours, /plan-ceo-review, /plan-eng-review, /plan-design-review,
+### 全部可用 skills
+
+**gstack 原生：**
+/office-hours, /plan-ceo-review, /plan-eng-review, /plan-design-review,
 /design-consultation, /design-shotgun, /design-html, /review, /ship, /land-and-deploy,
 /canary, /benchmark, /browse, /open-gstack-browser, /qa, /qa-only, /design-review,
 /setup-browser-cookies, /setup-deploy, /setup-gbrain, /sync-gbrain, /retro, /investigate,
-/document-release, /document-generate, /codex, /cso, /autoplan, /pair-agent, /careful, /freeze,
-/guard, /unfreeze, /gstack-upgrade, /learn, /spec, /diagram, /make-pdf.
+/document-release, /document-generate, /codex, /cso, /autoplan, /pair-agent, /careful,
+/freeze, /guard, /unfreeze, /gstack-upgrade, /learn, /spec, /diagram, /make-pdf,
+/context-save, /context-restore, /plan-tune
 
-**Skill routing for this project:**
-- 新功能规划 → `/office-hours` → `/plan-ceo-review` → `/plan-eng-review`
-- 编码完成后 → `/review` → `/qa http://localhost:5173` → `/ship`
-- 安全检查 → `/cso`
-- 架构文档 → `/document-release`
+**agent-skills（扩展包）：**
+/ui-ux-pro-max, /design-taste-frontend, /high-end-visual-design, /frontend-ui-engineering,
+/design-system, /ui-styling, /image-to-code,
+/planning-and-task-breakdown, /incremental-implementation, /full-output-enforcement,
+/source-driven-development, /spec-driven-development, /doubt-driven-development,
+/test-driven-development, /debugging-and-error-recovery, /code-review-and-quality,
+/security-and-hardening, /performance-optimization, /observability-and-instrumentation,
+/api-and-interface-design, /idea-refine, /brand, /git-workflow-and-versioning,
+/shipping-and-launch, /deprecation-and-migration, /context-engineering,
+/slides, /devex-review, /plan-devex-review, /using-agent-skills, /skillify
+
+### 本项目 Skill 流水线
+
+**🎨 UI / 视觉设计（当前最高优先级）**
+- 任何 UI 改动开始前 → `/ui-ux-pro-max`（定方向：风格 + 调色板 + 字体组合）
+- 组件/页面重设计 → `/design-taste-frontend`（Anti-slop 实现，防 AI 默认美学）
+- 高端科技感效果 → `/high-end-visual-design`（Barlow + 数据密集型仪表盘）
+- 多方案对比 → `/design-shotgun`（生成 3 个方向，结构化反馈后收敛）
+- Vue 组件落地 → `/frontend-ui-engineering`（可访问性、响应式、生产级）
+
+**📋 功能规划**
+- 新功能/产品讨论 → `/office-hours` → `/idea-refine` → `/spec`
+- 任务拆分 → `/planning-and-task-breakdown`
+- API 接口设计 → `/api-and-interface-design`
+- 架构评审 → `/plan-eng-review`
+
+**⚙️ 编码**
+- 多文件改动 → `/incremental-implementation`（逐步落地，防大爆炸）
+- 复杂逻辑/LLM 调用 → `/doubt-driven-development`（对抗性自审）
+- 参考官方文档 → `/source-driven-development`（Vue 3 / FastAPI / SQLAlchemy）
+- 需要测试覆盖 → `/test-driven-development`
+
+**🔍 质量保障**
+- 合并前代码审查 → `/review` + `/code-review-and-quality`（双轨审查）
+- 安全 / 鉴权 / 输入校验 → `/security-and-hardening` / `/cso`
+- Bug 排查 → `/debugging-and-error-recovery` / `/investigate`
+- 性能问题 → `/performance-optimization`
+- 日志 / 告警 → `/observability-and-instrumentation`
+- 防输出截断 → `/full-output-enforcement`（大文件生成时前置）
+
+**🚀 交付**
+- 功能验收 → `/qa http://localhost:5173`
+- 发布准备 → `/shipping-and-launch`（checklist + rollback）
+- 合并 / PR → `/ship`
+- 文档 → `/document-release`
+
+**🗂️ 上下文管理**
+- 会话快照 → `/context-save` / `/context-restore`
+- 切换任务前 → `/context-engineering`（重置上下文，提升质量）
 
 ## 项目概述
 
@@ -277,19 +325,47 @@ API_FOOTBALL_KEY=
 
 ## Skill routing
 
-When the user's request matches an available skill, invoke it via the Skill tool. When in doubt, invoke the skill.
+When the user's request matches an available skill, **invoke it via the Skill tool before doing anything else.** When in doubt, invoke the skill.
 
-Key routing rules:
-- Product ideas/brainstorming → invoke /office-hours
-- Strategy/scope → invoke /plan-ceo-review
-- Architecture → invoke /plan-eng-review
-- Design system/plan review → invoke /design-consultation or /plan-design-review
-- Full review pipeline → invoke /autoplan
-- Bugs/errors → invoke /investigate
-- QA/testing site behavior → invoke /qa or /qa-only
-- Code review/diff check → invoke /review
-- Visual polish → invoke /design-review
-- Ship/deploy/PR → invoke /ship or /land-and-deploy
-- Save progress → invoke /context-save
-- Resume context → invoke /context-restore
-- Author a backlog-ready spec/issue → invoke /spec
+### UI / 视觉设计
+- 任何 UI 改动、重设计、科技感升级 → invoke /ui-ux-pro-max 确定方向，再 invoke /design-taste-frontend 实现
+- 高端视觉效果、仪表盘美化 → invoke /high-end-visual-design
+- 需要多方案对比 → invoke /design-shotgun
+- Vue 组件生产级实现 → invoke /frontend-ui-engineering
+- HTML 原型 → invoke /design-html
+- 设计系统 / Token → invoke /design-system
+
+### 需求 / 规划
+- 产品讨论、头脑风暴 → invoke /office-hours
+- 想法细化 → invoke /idea-refine
+- 写 spec / 需求文档 → invoke /spec
+- 任务拆分 → invoke /planning-and-task-breakdown
+- API / 接口设计 → invoke /api-and-interface-design
+- 架构评审 → invoke /plan-eng-review
+- 策略评审 → invoke /plan-ceo-review
+
+### 编码
+- 多文件改动 → invoke /incremental-implementation
+- 高风险 / 复杂逻辑 → invoke /doubt-driven-development
+- 需参考文档 → invoke /source-driven-development
+- 需要测试 → invoke /test-driven-development
+- 大段代码生成防截断 → invoke /full-output-enforcement
+
+### 质量 / 调试
+- 代码审查 → invoke /review 或 /code-review-and-quality
+- 完整 review 流水线 → invoke /autoplan
+- Bug 排查 → invoke /investigate 或 /debugging-and-error-recovery
+- 安全审计 → invoke /cso 或 /security-and-hardening
+- 性能 → invoke /performance-optimization
+- 日志 / 监控 → invoke /observability-and-instrumentation
+- QA 验收 → invoke /qa http://localhost:5173
+
+### 交付
+- Ship / PR → invoke /ship 或 /land-and-deploy
+- 发布检查 → invoke /shipping-and-launch
+- 文档 → invoke /document-release
+
+### 上下文
+- 保存进度 → invoke /context-save
+- 恢复上下文 → invoke /context-restore
+- 任务切换前清理 → invoke /context-engineering

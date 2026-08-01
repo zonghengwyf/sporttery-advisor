@@ -179,15 +179,17 @@ async def sync_match_results():
         updated = 0
 
         for match in pending_matches:
-            actual = await _fetch_result(source_manager, match)
+            actual, score = await _fetch_result(source_manager, match)
             if actual is None:
                 continue
 
             match.actual_result = actual
             match.result_locked = True
+            if score:
+                match.actual_score = score
             updated += 1
-            logger.info("赛果同步 match_id=%d %s vs %s → %s",
-                        match.id, match.home_team, match.away_team, actual)
+            logger.info("赛果同步 match_id=%d %s vs %s → %s (%s)",
+                        match.id, match.home_team, match.away_team, actual, score or "—")
 
             await _settle_bet_records(session, match, actual)
 
@@ -195,13 +197,13 @@ async def sync_match_results():
         logger.info("赛果同步完成：%d / %d 场", updated, len(pending_matches))
 
 
-async def _fetch_result(source_manager, match) -> str | None:
-    """尝试从多个数据源获取赛果，返回 H/D/A 或 None。"""
+async def _fetch_result(source_manager, match) -> tuple[str | None, str | None]:
+    """尝试从多个数据源获取赛果，返回 (H/D/A | None, score | None)。"""
     # 1. 竞彩 API
     try:
-        result = await source_manager.get_match_result(match.sporttery_id)
+        result, score = await source_manager.get_match_result(match.sporttery_id)
         if result:
-            return result
+            return result, score
     except Exception as exc:
         logger.debug("竞彩 API 赛果失败 %s: %s", match.sporttery_id, exc)
 
@@ -209,16 +211,18 @@ async def _fetch_result(source_manager, match) -> str | None:
     try:
         result = await source_manager.get_odds_api_result(match)
         if result:
-            return result
+            return result, None
     except Exception as exc:
         logger.debug("The Odds API 赛果失败: %s", exc)
 
-    return None
+    return None, None
 
 
 async def _settle_bet_records(session, match, actual_result: str):
     """根据已知赛果，结算关联该场次的待结算 BetRecord。"""
     from sqlalchemy import select as sa_select
+    from sqlalchemy.orm.attributes import flag_modified
+    from api.bets import _hhad_result_from_score
     from db.models import BetRecord
 
     outcome_map = {"H": "主胜", "D": "平局", "A": "客胜"}
@@ -242,7 +246,17 @@ async def _settle_bet_records(session, match, actual_result: str):
             if leg.get("void"):
                 continue
             if leg.get("match_id") == match.id:
-                won = leg.get("pick") == actual_pick
+                # HHAD 让球盘：必须用比分推算让球结果，不能直接用原始 H/D/A
+                if leg.get("market") == "让球胜平负" and leg.get("handicap") is not None:
+                    hhad_result = _hhad_result_from_score(match.actual_score, leg["handicap"])
+                    if hhad_result is None:
+                        # 比分未录入，无法结算
+                        all_settled = False
+                        continue
+                    pick_for_leg = outcome_map.get(hhad_result)
+                else:
+                    pick_for_leg = actual_pick
+                won = leg.get("pick") == pick_for_leg
                 leg["actual_result"] = actual_result
                 leg["won"] = won
                 if not won:
@@ -251,6 +265,9 @@ async def _settle_bet_records(session, match, actual_result: str):
                 if "won" not in leg:
                     all_settled = False
             total_odds *= leg.get("odds", 1.0)
+
+        # JSON 列需显式标记脏位，SQLAlchemy 才会追踪原地修改
+        flag_modified(record, "legs")
 
         if all_settled:
             record.status = "won" if all_won else "lost"

@@ -1,14 +1,18 @@
+import asyncio
 import json
 import logging
 import uuid
+from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+import redis.asyncio as aioredis
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import get_current_user
+from config import get_settings
 from db.models import Match, Prediction, User
 from db.session import AsyncSessionLocal, get_db
 
@@ -17,17 +21,38 @@ logger = logging.getLogger(__name__)
 
 MAX_AUTO_ANALYZE = 4
 
+# ── Redis client（懒初始化，复用连接池） ──────────────────────────────────────
+
+_redis: aioredis.Redis | None = None
+
+
+def _get_redis() -> aioredis.Redis:
+    global _redis
+    if _redis is None:
+        _redis = aioredis.from_url(get_settings().redis_url, decode_responses=True)
+    return _redis
+
+
+def _task_prefix(task_id: str) -> str:
+    return f"ticket_task:{task_id}"
+
 
 class TicketsRequest(BaseModel):
     match_ids: list[int]
     budget: float | None = None
-    force: bool = False   # True = 忽略缓存，强制重跑多角色 Ensemble 分析
+    force: bool = False         # True = 忽略缓存，强制重跑多角色 Ensemble 分析
+    analyze_all: bool = False   # True = 自动分析全部未分析场次（不受 MAX_AUTO_ANALYZE 限制）
+    multiplier: int = 1         # 用户倍数（竞彩每注倍数，≥1）
 
     @property
     def effective_budget(self) -> float:
         if self.budget is None or self.budget <= 0:
             return 100.0
         return self.budget
+
+    @property
+    def effective_multiplier(self) -> int:
+        return max(1, int(self.multiplier))
 
 
 def _sse(event_type: str, **kwargs) -> str:
@@ -161,7 +186,7 @@ async def generate_tickets(
         found_ids = {ep["match"].id for ep in enriched_preds}
         missing_ids = [mid for mid in req.match_ids if mid not in found_ids]
         if missing_ids:
-            if len(missing_ids) > MAX_AUTO_ANALYZE:
+            if len(missing_ids) > MAX_AUTO_ANALYZE and not req.analyze_all:
                 raise HTTPException(
                     status_code=422,
                     detail=f"所选 {len(missing_ids)} 场赛事尚未分析。请先在赛事页触发分析，或每次最多选 {MAX_AUTO_ANALYZE} 场自动分析",
@@ -199,7 +224,9 @@ async def generate_tickets(
         raise HTTPException(status_code=422, detail="所选赛事均无法完成分析，请检查 LLM 配置或稍后重试")
 
     generator = TicketGenerator()
-    plans = generator.generate_parlay_plans(enriched_preds, budget=budget)
+    plans = generator.generate_parlay_plans(
+        enriched_preds, budget=budget, multiplier=req.effective_multiplier
+    )
     if not plans:
         raise HTTPException(status_code=422, detail=_empty_plans_reason(enriched_preds))
     return _build_schemes(plans, enriched_preds)
@@ -220,6 +247,8 @@ async def stream_tickets(
     match_ids = req.match_ids
     budget = req.effective_budget
     force = req.force
+    analyze_all = req.analyze_all
+    multiplier = req.effective_multiplier
 
     async def _generate():
         async with AsyncSessionLocal() as db:
@@ -257,6 +286,8 @@ async def stream_tickets(
                         yield _sse(
                             "step", step="ai",
                             msg=f"多角色分析 {match.home_team} vs {match.away_team}（{i+1}/{n_matches}，{n_models} 个模型并发）…",
+                            match_name=f"{match.home_team} vs {match.away_team}",
+                            match_index=i + 1, match_total=n_matches,
                             index=1, total=4,
                         )
                         try:
@@ -320,7 +351,7 @@ async def stream_tickets(
                     n_missing = len(missing_ids)
 
                     if missing_ids:
-                        if len(missing_ids) > MAX_AUTO_ANALYZE:
+                        if len(missing_ids) > MAX_AUTO_ANALYZE and not analyze_all:
                             yield _sse(
                                 "error",
                                 msg=f"所选 {len(missing_ids)} 场赛事尚未分析。请先在赛事页触发分析，或每次最多选 {MAX_AUTO_ANALYZE} 场自动分析",
@@ -346,6 +377,8 @@ async def stream_tickets(
                             yield _sse(
                                 "step", step="ai",
                                 msg=f"AI 分析 {match.home_team} vs {match.away_team} ({i+1}/{n_missing})…",
+                                match_name=f"{match.home_team} vs {match.away_team}",
+                                match_index=i + 1, match_total=n_missing,
                                 index=1, total=4,
                             )
                             try:
@@ -408,7 +441,9 @@ async def stream_tickets(
                 yield _sse("step", step="ticket", msg="筛选票型 & 分配资金…", index=3, total=4)
 
                 gen = TicketGenerator()
-                plans = gen.generate_parlay_plans(enriched_preds, budget=budget)
+                plans = gen.generate_parlay_plans(
+                    enriched_preds, budget=budget, multiplier=multiplier
+                )
 
                 if not plans:
                     yield _sse("error", msg=_empty_plans_reason(enriched_preds))
@@ -433,6 +468,304 @@ async def stream_tickets(
     )
 
 
+# ── 任务化生成（POST /task + GET /task/{task_id}）────────────────────────────
+
+@router.post("/task")
+async def create_ticket_task(
+    req: TicketsRequest,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+):
+    """创建后台票型生成任务，立即返回 task_id；前端轮询 GET /task/{task_id} 获取进度和结果。"""
+    if not req.match_ids:
+        raise HTTPException(status_code=400, detail="请至少选择一场赛事")
+
+    task_id = str(uuid.uuid4())
+    r = _get_redis()
+    prefix = _task_prefix(task_id)
+    pipe = r.pipeline()
+    pipe.set(f"{prefix}:status", "queued", ex=86400)
+    pipe.set(f"{prefix}:meta", json.dumps({
+        "match_ids": req.match_ids,
+        "force": req.force,
+        "analyze_all": req.analyze_all,
+        "user_id": current_user.id,
+        "created_at": datetime.utcnow().isoformat(),
+    }), ex=86400)
+    await pipe.execute()
+
+    background_tasks.add_task(_run_ticket_task, task_id, req, current_user.id)
+    return {"task_id": task_id, "status": "queued"}
+
+
+@router.get("/task/{task_id}")
+async def get_ticket_task(
+    task_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """轮询票型生成任务状态。返回 { task_id, status, events, result }。"""
+    r = _get_redis()
+    prefix = _task_prefix(task_id)
+    status, events_raw, result_raw, meta_raw = await asyncio.gather(
+        r.get(f"{prefix}:status"),
+        r.lrange(f"{prefix}:events", 0, -1),
+        r.get(f"{prefix}:result"),
+        r.get(f"{prefix}:meta"),
+    )
+    if not status:
+        raise HTTPException(status_code=404, detail="任务不存在或已过期（24h 后自动清理）")
+
+    if meta_raw:
+        meta = json.loads(meta_raw)
+        if meta.get("user_id") != current_user.id:
+            raise HTTPException(status_code=403, detail="无权访问该任务")
+
+    return {
+        "task_id": task_id,
+        "status": status,
+        "events": [json.loads(e) for e in (events_raw or [])],
+        "result": json.loads(result_raw) if result_raw else None,
+    }
+
+
+async def _run_ticket_task(task_id: str, req: TicketsRequest, user_id: int) -> None:
+    """后台任务：运行票型生成流水线，将进度事件写入 Redis List，结果写入 Redis String。"""
+    r = _get_redis()
+    prefix = _task_prefix(task_id)
+    TTL = 86400
+
+    async def push(event_type: str, **kwargs) -> None:
+        payload = json.dumps({"event": event_type, **kwargs})
+        await r.rpush(f"{prefix}:events", payload)
+        await r.expire(f"{prefix}:events", TTL)
+
+    await r.set(f"{prefix}:status", "running", ex=TTL)
+
+    match_ids = req.match_ids
+    budget = req.effective_budget
+    force = req.force
+    analyze_all = req.analyze_all
+    multiplier = req.effective_multiplier
+
+    async with AsyncSessionLocal() as db:
+        try:
+            from core.pipeline import DailyPipeline
+            from core.tickets.generator import TicketGenerator
+
+            pipeline = DailyPipeline()
+            enriched_preds: list[dict] = []
+
+            if force:
+                await push("step", step="check", msg="启动多角色评估，读取模型配置…", index=0, total=4)
+
+                from core.ensemble import (
+                    EnsembleAnalyzer, get_active_llm_configs,
+                    get_ensemble_config,
+                )
+                ensemble_cfg = await get_ensemble_config(db, user_id)
+                llm_configs = await get_active_llm_configs(db, user_id, ensemble_cfg)
+
+                if not llm_configs:
+                    await push("error", msg="请先在设置页配置 AI 模型，再使用多角色评估")
+                    await r.set(f"{prefix}:status", "error", ex=TTL)
+                    return
+
+                n_models = len(llm_configs)
+                n_matches = len(match_ids)
+                analyzer = EnsembleAnalyzer(pipeline)
+                run_id = str(uuid.uuid4())[:8]
+
+                for i, mid in enumerate(match_ids):
+                    match = await db.get(Match, mid)
+                    if not match:
+                        continue
+                    await push(
+                        "step", step="ai",
+                        msg=f"多角色分析 {match.home_team} vs {match.away_team}（{i+1}/{n_matches}，{n_models} 个模型并发）…",
+                        match_name=f"{match.home_team} vs {match.away_team}",
+                        match_index=i + 1, match_total=n_matches,
+                        index=1, total=4,
+                    )
+                    try:
+                        stat_probs, fused_probs, llm_result, votes_list = await _ensemble_analyze_match(
+                            db, match, pipeline, analyzer, llm_configs, ensemble_cfg
+                        )
+                        consensus_ratio = llm_result.pop("_consensus_ratio", 0)
+                        final_outcome = llm_result.pop("_final_outcome", "")
+
+                        tickets = pipeline.ticket_gen.generate_for_match(match, fused_probs, llm_result)
+                        tickets["ensemble_votes"] = votes_list
+                        tickets["consensus_ratio"] = consensus_ratio
+                        tickets["final_outcome"] = final_outcome
+
+                        pred = Prediction(
+                            match_id=match.id,
+                            run_id=run_id,
+                            user_id=user_id,
+                            stat_probs=stat_probs,
+                            fused_probs=fused_probs,
+                            intel_summary=llm_result.get("intel_summary", ""),
+                            risk_label=llm_result.get("risk_label", "guarded"),
+                            confidence=float(llm_result.get("confidence", 50)) / 100.0,
+                            tickets=tickets,
+                            llm_provider="ensemble",
+                            llm_model="+".join(f"{c.provider.value}/{c.model}" for c in llm_configs)[:100],
+                        )
+                        db.add(pred)
+                        await db.commit()
+                        await db.refresh(pred)
+                        enriched_preds.append({"match": match, "prediction": pred, "ensemble_votes": votes_list})
+                        logger.info(
+                            "task Ensemble 完成 match_id=%d 共识=%.0f%% 方向=%s",
+                            match.id, consensus_ratio * 100, final_outcome,
+                        )
+                    except Exception as exc:
+                        logger.warning("task Ensemble 失败 match_id=%d: %s", mid, exc)
+                        try:
+                            await db.rollback()
+                        except Exception:
+                            pass
+
+            else:
+                await push("step", step="check", msg="检查已有分析数据…", index=0, total=4)
+
+                existing: dict[int, Prediction] = {}
+                for mid in match_ids:
+                    result = await db.execute(
+                        select(Prediction)
+                        .where(Prediction.match_id == mid)
+                        .order_by(Prediction.created_at.desc())
+                        .limit(1)
+                    )
+                    pred = result.scalar_one_or_none()
+                    if pred and pred.tickets:
+                        existing[mid] = pred
+
+                missing_ids = [mid for mid in match_ids if mid not in existing]
+                n_existing = len(existing)
+                n_missing = len(missing_ids)
+
+                if missing_ids:
+                    if len(missing_ids) > MAX_AUTO_ANALYZE and not analyze_all:
+                        await push(
+                            "error",
+                            msg=f"所选 {len(missing_ids)} 场赛事尚未分析。请先在赛事页触发分析，或每次最多选 {MAX_AUTO_ANALYZE} 场自动分析",
+                        )
+                        await r.set(f"{prefix}:status", "error", ex=TTL)
+                        return
+
+                    from api.predictions import _get_user_llm_client
+                    llm_client = await _get_user_llm_client(db, user_id)
+                    if not llm_client:
+                        await push("error", msg="请先在设置页配置 LLM，再生成投注方案")
+                        await r.set(f"{prefix}:status", "error", ex=TTL)
+                        return
+
+                    await push(
+                        "step", step="ai",
+                        msg=f"AI 情报分析：已有 {n_existing} 场，新分析 {n_missing} 场…",
+                        index=1, total=4,
+                    )
+
+                    for i, mid in enumerate(missing_ids):
+                        match = await db.get(Match, mid)
+                        if not match:
+                            continue
+                        await push(
+                            "step", step="ai",
+                            msg=f"AI 分析 {match.home_team} vs {match.away_team} ({i+1}/{n_missing})…",
+                            match_name=f"{match.home_team} vs {match.away_team}",
+                            match_index=i + 1, match_total=n_missing,
+                            index=1, total=4,
+                        )
+                        try:
+                            ar = await pipeline.analyze_single_match(db, match, llm_client)
+                            pred = Prediction(
+                                match_id=ar.match_id, run_id=ar.run_id,
+                                user_id=user_id,
+                                stat_probs=ar.stat_probs, fused_probs=ar.fused_probs,
+                                intel_summary=ar.intel_summary, risk_label=ar.risk_label,
+                                confidence=ar.confidence, tickets=ar.tickets,
+                                llm_provider=ar.llm_provider, llm_model=ar.llm_model,
+                            )
+                            db.add(pred)
+                            await db.commit()
+                            await db.refresh(pred)
+                            existing[mid] = pred
+                        except Exception as exc:
+                            logger.warning("task 自动分析失败 match_id=%d: %s", mid, exc)
+                            try:
+                                await db.rollback()
+                            except Exception:
+                                pass
+                else:
+                    await push(
+                        "step", step="ai",
+                        msg=f"全部 {n_existing} 场已有分析数据，跳过 AI…",
+                        index=1, total=4,
+                    )
+
+                for mid, pred in existing.items():
+                    m = await db.get(Match, mid)
+                    if m:
+                        votes = (pred.tickets or {}).get("ensemble_votes", [])
+                        enriched_preds.append({"match": m, "prediction": pred, "ensemble_votes": votes})
+
+            # ── 汇总阶段（force/非 force 共用） ──────────────────────────────
+            if not enriched_preds:
+                await push("error", msg="所选赛事均无法完成分析，请检查 LLM 配置或稍后重试")
+                await r.set(f"{prefix}:status", "error", ex=TTL)
+                return
+
+            avg_conf = 0.0
+            n_with_conf = 0
+            total_votes = 0
+            for ep in enriched_preds:
+                pred = ep["prediction"]
+                if pred and pred.confidence:
+                    avg_conf += pred.confidence
+                    n_with_conf += 1
+                total_votes += len(ep.get("ensemble_votes") or [])
+
+            avg_conf_pct = round(avg_conf / max(n_with_conf, 1) * 100)
+            votes_info = f"，多角色投票 {total_votes} 条" if total_votes > 0 else ""
+            await push(
+                "step", step="model",
+                msg=f"融合 {len(enriched_preds)} 场概率，平均置信度 {avg_conf_pct}%{votes_info}…",
+                index=2, total=4,
+            )
+
+            await push("step", step="ticket", msg="筛选票型 & 分配资金…", index=3, total=4)
+
+            gen = TicketGenerator()
+            plans = gen.generate_parlay_plans(
+                enriched_preds, budget=budget, multiplier=multiplier
+            )
+
+            if not plans:
+                await push("error", msg=_empty_plans_reason(enriched_preds))
+                await r.set(f"{prefix}:status", "error", ex=TTL)
+                return
+
+            _PLAN_LABELS = {
+                "conservative": "稳健", "balanced": "均衡",
+                "high_odds": "博高赔", "scoreline": "比分",
+            }
+            plan_summary = "·".join(_PLAN_LABELS.get(p.plan_id, p.plan_id) for p in plans)
+            schemes = _build_schemes(plans, enriched_preds)
+            await push("done", summary=f"生成 {len(plans)} 套方案：{plan_summary}")
+            pipe = r.pipeline()
+            pipe.set(f"{prefix}:result", json.dumps(schemes), ex=TTL)
+            pipe.set(f"{prefix}:status", "done", ex=TTL)
+            await pipe.execute()
+            logger.info("ticket task 完成 task_id=%s schemes=%s", task_id, plan_summary)
+
+        except Exception as exc:
+            logger.error("ticket task 未处理异常 task_id=%s: %s", task_id, exc, exc_info=True)
+            await push("error", msg="服务器内部错误，请稍后重试")
+            await r.set(f"{prefix}:status", "error", ex=TTL)
+
+
 # ── 构建方案响应 ──────────────────────────────────────────────────────────────
 
 def _build_schemes(plans, enriched_preds) -> dict:
@@ -445,30 +778,10 @@ def _build_schemes(plans, enriched_preds) -> dict:
     for plan in plans:
         legs_out = []
         for leg in plan.legs:
-            leg_d = {
-                "match_id":       leg.match_id,
-                "match_code":     leg.match_code,
-                "home_team":      leg.home_team,
-                "away_team":      leg.away_team,
-                "kickoff":        leg.kickoff,
-                "league":         mid_to_league.get(leg.match_id, ""),
-                "market":         leg.market,
-                "pick":           leg.pick,
-                "pick_code":      leg.pick_code,
-                "odds":           leg.odds,
-                "odds_estimated": leg.odds_estimated,
-                "confidence":     round(leg.win_prob * 100, 1),
-                "rationale":      "",
-                "model_votes": {
-                    "agree":  leg.model_votes_agree,
-                    "total":  leg.model_votes_total,
-                    "models": leg.model_names,
-                },
-            }
-            if leg.handicap is not None:
-                from core.tickets.hhad import format_handicap
-                leg_d["handicap"] = leg.handicap
-                leg_d["handicap_label"] = format_handicap(leg.handicap)
+            leg_d = leg.to_dict()
+            leg_d["league"] = mid_to_league.get(leg.match_id, "")
+            leg_d["confidence"] = round(leg.win_prob * 100, 1)
+            leg_d["rationale"] = ""
             legs_out.append(leg_d)
 
         schemes[plan.plan_id] = {
@@ -479,6 +792,7 @@ def _build_schemes(plans, enriched_preds) -> dict:
             "legs":              legs_out,
             "total_odds":        plan.total_odds,
             "parlay_type":       plan.parlay_type,
+            "num_combos":        plan.num_combos,
             "stake":             plan.total_stake,
             "win_probability":   plan.win_probability,
             "theoretical_prize": plan.theoretical_prize,

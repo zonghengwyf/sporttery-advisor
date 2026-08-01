@@ -215,6 +215,58 @@ async function tryNavigateToMatch(matchId: number) {
   } catch { /* match not found — silently skip */ }
 }
 
+// ── 手动比分录入 ──────────────────────────────────────────────────────────────
+
+const scoreEditing = ref<Record<number, boolean>>({})   // match_id → editing open
+const scoreInput = ref<Record<number, string>>({})       // match_id → raw input "2-1"
+const scoreSubmitting = ref<Record<number, boolean>>({}) // match_id → in-flight
+
+function scoreMissingIds(run: AutoRun): Set<number> {
+  const ids = new Set<number>()
+  if (!run.sync_error) return ids
+  for (const part of run.sync_error.split(';')) {
+    const m = part.match(/match#(\d+):\s*score_missing/)
+    if (m) ids.add(parseInt(m[1]))
+  }
+  return ids
+}
+
+function openScoreEntry(matchId: number, e: Event) {
+  e.stopPropagation()
+  scoreEditing.value = { ...scoreEditing.value, [matchId]: true }
+  if (!scoreInput.value[matchId]) scoreInput.value = { ...scoreInput.value, [matchId]: '' }
+}
+
+function closeScoreEntry(matchId: number, e: Event) {
+  e.stopPropagation()
+  const ed = { ...scoreEditing.value }
+  delete ed[matchId]
+  scoreEditing.value = ed
+}
+
+async function submitScore(matchId: number, runId: number, e: Event) {
+  e.stopPropagation()
+  const raw = (scoreInput.value[matchId] ?? '').trim()
+  const parts = raw.split(/[-:]/)
+  if (parts.length !== 2) return
+  const h = parseInt(parts[0].trim()), a = parseInt(parts[1].trim())
+  if (isNaN(h) || isNaN(a) || h < 0 || a < 0) return
+
+  const actual_result = h > a ? 'H' : h < a ? 'A' : 'D'
+  scoreSubmitting.value = { ...scoreSubmitting.value, [matchId]: true }
+  try {
+    await api.patch(`/matches/${matchId}/result`, { actual_result, actual_score: `${h}-${a}` })
+    closeScoreEntry(matchId, e)
+    await syncRun(runId)
+  } catch (e: any) {
+    loadError.value = e?.response?.data?.detail ?? '录入失败，请重试'
+  } finally {
+    const sb = { ...scoreSubmitting.value }
+    delete sb[matchId]
+    scoreSubmitting.value = sb
+  }
+}
+
 function toggleSkipped(id: number) {
   const s = new Set(skippedExpanded.value)
   s.has(id) ? s.delete(id) : s.add(id)
@@ -1041,6 +1093,25 @@ const maxAbsProfit = computed(() =>
                       <span v-if="leg.won !== undefined" :class="leg.won ? 'result-hit sd-result' : 'result-miss sd-result'">
                         {{ leg.won ? '✓ 命中' : '✗ 未中' }}
                       </span>
+                      <template v-else-if="leg.match_id && scoreMissingIds(detailInfo.run).has(leg.match_id)">
+                        <template v-if="scoreEditing[leg.match_id]">
+                          <input
+                            class="score-input"
+                            v-model="scoreInput[leg.match_id]"
+                            placeholder="2-1"
+                            maxlength="5"
+                            @click.stop
+                            @keyup.enter="submitScore(leg.match_id, detailInfo.run.id, $event)"
+                          />
+                          <button
+                            class="score-ok-btn"
+                            :disabled="scoreSubmitting[leg.match_id]"
+                            @click="submitScore(leg.match_id, detailInfo.run.id, $event)"
+                          >{{ scoreSubmitting[leg.match_id] ? '…' : '确认' }}</button>
+                          <button class="score-cancel-btn" @click="closeScoreEntry(leg.match_id, $event)">✕</button>
+                        </template>
+                        <button v-else class="score-entry-btn" @click="openScoreEntry(leg.match_id, $event)">录入比分</button>
+                      </template>
                       <span v-else class="sd-leg-pending">待结算</span>
                     </div>
                   </div>
@@ -1975,6 +2046,34 @@ const maxAbsProfit = computed(() =>
 .sd-leg-arrow { color: var(--text3, rgba(255,255,255,.3)); flex-shrink: 0; }
 .sd-result { font-weight: 700; flex-shrink: 0; }
 .sd-leg-pending { color: var(--text3, rgba(255,255,255,.4)); font-size: 10px; }
+
+/* 手动比分录入 */
+.score-entry-btn {
+  font-size: 10px; font-weight: 600;
+  padding: 2px 7px; border-radius: 4px;
+  border: 1px solid rgba(99,179,237,.5);
+  color: #63b3ed; background: rgba(99,179,237,.08);
+  cursor: pointer; flex-shrink: 0;
+}
+.score-entry-btn:active { background: rgba(99,179,237,.18); }
+.score-input {
+  width: 52px; font-size: 11px; text-align: center;
+  background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.15);
+  border-radius: 4px; color: var(--text1); padding: 2px 5px;
+  outline: none;
+}
+.score-input:focus { border-color: rgba(99,179,237,.6); }
+.score-ok-btn {
+  font-size: 10px; font-weight: 600; padding: 2px 7px;
+  border-radius: 4px; border: 1px solid rgba(72,187,120,.5);
+  color: #48bb78; background: rgba(72,187,120,.1); cursor: pointer;
+}
+.score-ok-btn:disabled { opacity: .5; cursor: default; }
+.score-cancel-btn {
+  font-size: 10px; padding: 2px 5px; border-radius: 4px;
+  border: 1px solid rgba(255,255,255,.1); color: var(--text3);
+  background: transparent; cursor: pointer;
+}
 .sd-leg--won .sd-leg-line1 { color: var(--text, #fff); }
 .sd-leg--lost .sd-leg-line1 { color: var(--text3, rgba(255,255,255,.5)); }
 .sd-foot {

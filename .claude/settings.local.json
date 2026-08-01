@@ -2,7 +2,16 @@
   "permissions": {
     "allow": [
       "Bash(python *)",
-      "Bash(gh pr *)"
+      "Bash(gh pr *)",
+      "Skill(review)",
+      "Skill(plan-design-review)",
+      "mcp__ide__getDiagnostics",
+      "Skill(browse)",
+      "Skill(spec)",
+      "Bash(/c/Users/wyf/.claude/skills/gstack/browse/dist/browse console *)",
+      "Bash(/c/Users/wyf/.claude/skills/gstack/browse/dist/browse snapshot *)",
+      "Bash(/c/Users/wyf/.claude/skills/gstack/browse/dist/browse screenshot *)",
+      "Bash(/c/Users/wyf/.claude/skills/gstack/browse/dist/browse js *)"
     ]
   }
 }

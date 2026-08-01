@@ -499,7 +499,14 @@ input, textarea { font-family: inherit; }
 }
 .input:focus { border-color: var(--primary); }
 .input::placeholder { color: var(--text2); }
-select.input { appearance: none; cursor: pointer; }
+select.input {
+  appearance: none;
+  cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 20 20' fill='%23999999'%3E%3Cpath fill-rule='evenodd' d='M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z' clip-rule='evenodd'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  padding-right: 30px;
+}
 
 /* ─── AI chat ─── */
 .chat-avatar {
@@ -622,6 +629,38 @@ select.input { appearance: none; cursor: pointer; }
 .fade-enter-active, .fade-leave-active { transition: opacity .15s; }
 .fade-enter-from, .fade-leave-to { opacity: 0; }
 
+/* ─── Tech feel utilities ─── */
+
+/* Live pulse dot — 实时状态指示器 */
+.live-dot {
+  display: inline-block;
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 0 2px rgba(22,163,74,.18);
+  animation: live-pulse 2.4s ease-in-out infinite;
+  flex-shrink: 0;
+}
+.live-dot--warn { background: var(--gold); box-shadow: 0 0 0 2px rgba(180,83,9,.18); }
+.live-dot--err  { background: var(--red);  box-shadow: 0 0 0 2px rgba(197,48,48,.18); }
+@keyframes live-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%       { opacity: .55; transform: scale(.8); }
+}
+
+/* Dark mode card hover — subtle inner glow */
+@media (prefers-color-scheme: dark) {
+  .card:hover { box-shadow: var(--card-sh-h), inset 0 0 0 1px rgba(255,255,255,.06); }
+}
+.dark .card:hover { box-shadow: var(--card-sh-h), inset 0 0 0 1px rgba(255,255,255,.06); }
+
+/* Data density helpers */
+.tighter { gap: 4px !important; }
+.compact { padding: 8px 12px !important; }
+
+/* Mono input — for API keys / URLs */
+.input-mono { font-family: var(--font-num); font-size: 13px; letter-spacing: .3px; }
+
 /* ─── Featured nav — 方案 凸显 ─── */
 /* Desktop: ghost-button style even when inactive */
 .mh-link--featured:not(.active) {
@@ -635,6 +674,8 @@ select.input { appearance: none; cursor: pointer; }
   .bn-item--featured {
     position: relative;
     overflow: visible;
+  }
+  .bn-item--featured.active {
     color: var(--primary);
   }
   .bn-item--featured::before { display: none; }

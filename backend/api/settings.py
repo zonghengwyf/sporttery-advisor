@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,12 +13,12 @@ router = APIRouter()
 # 模型列表 registry — 在这里更新，无需重建前端
 PROVIDER_MODELS: dict[str, list[str]] = {
     "claude":   ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5-20251001",
-                 "claude-3-5-sonnet-20241022", "claude-3-opus-20240229"],
-    "openai":   ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "o1", "o1-mini", "o3-mini", "o4-mini"],
-    "gemini":   ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash"],
+                 "claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022"],
+    "openai":   ["gpt-4o", "gpt-4o-mini", "o1", "o1-mini", "o3-mini", "o4-mini"],
+    "gemini":   ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"],
     "deepseek": ["deepseek-chat", "deepseek-reasoner"],
     "kimi":     ["moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"],
-    "glm":      ["glm-4-flash", "glm-4-air", "glm-4", "glm-z1-flash", "glm-z1-air"],
+    "glm":      ["glm-4-flash", "glm-4-air", "glm-4-plus", "glm-4", "glm-z1-flash"],
     "custom":   [],
 }
 
@@ -451,11 +451,13 @@ async def upsert_ensemble_config(
 
 # ── 自动出票配置 ──────────────────────────────────────────────────────────────
 
+_CRON_RE = r"^(\*|[0-9,\-\/]+)\s+(\*|[0-9,\-\/]+)\s+(\*|[0-9,\-\/]+)\s+(\*|[0-9,\-\/]+)\s+(\*|[0-9,\-\/]+)$"
+
+
 class AutoTicketConfigIn(BaseModel):
     enabled: bool = False
-    cron: str = "30 9 * * *"        # 出票时间（Cron，Asia/Shanghai）
-    stake: float = 10.0              # 参考投注额
-    sync_cron: str = "0 2 * * *"    # 赛果同步时间
+    cron: str = Field(default="30 9 * * *", pattern=_CRON_RE)
+    sync_cron: str = Field(default="0 2 * * *", pattern=_CRON_RE)
 
 
 @router.get("/auto-ticket")

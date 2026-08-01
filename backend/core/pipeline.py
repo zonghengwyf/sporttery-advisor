@@ -758,16 +758,23 @@ def _run_factor_scorer(llm_result: dict):
     if not raw_scores or not isinstance(raw_scores, dict):
         return None
 
+    def _clamp(v, default=50.0) -> float:
+        try:
+            f = float(v)
+            return max(0.0, min(100.0, f)) if f == f else default  # NaN guard
+        except (TypeError, ValueError):
+            return default
+
     try:
         fs = FactorScores(
-            team_strength=float(raw_scores.get("team_strength", 50)),
-            recent_form=float(raw_scores.get("recent_form", 50)),
-            availability=float(raw_scores.get("availability", 50)),
-            tactical_matchup=float(raw_scores.get("tactical_matchup", 50)),
-            schedule_venue=float(raw_scores.get("schedule_venue", 50)),
-            motivation=float(raw_scores.get("motivation", 50)),
-            odds_market=float(raw_scores.get("odds_market", 50)),
-            psychological=float(raw_scores.get("psychological", 50)),
+            team_strength=_clamp(raw_scores.get("team_strength", 50)),
+            recent_form=_clamp(raw_scores.get("recent_form", 50)),
+            availability=_clamp(raw_scores.get("availability", 50)),
+            tactical_matchup=_clamp(raw_scores.get("tactical_matchup", 50)),
+            schedule_venue=_clamp(raw_scores.get("schedule_venue", 50)),
+            motivation=_clamp(raw_scores.get("motivation", 50)),
+            odds_market=_clamp(raw_scores.get("odds_market", 50)),
+            psychological=_clamp(raw_scores.get("psychological", 50)),
         )
 
         abnormal_raw = llm_result.get("abnormal_result", "none")

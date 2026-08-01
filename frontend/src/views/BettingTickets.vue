@@ -1,12 +1,17 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import api, { betsApi } from '@/api'
 import { useBettingStore } from '@/stores/betting'
+import AnalysisModeSheet from '@/components/AnalysisModeSheet.vue'
+import { useAnalysisPreference, type AnalysisMode } from '@/composables/useAnalysisPreference'
+import { useTicketTask } from '@/composables/useTicketTask'
 
 const router = useRouter()
 const route = useRoute()
 const bettingStore = useBettingStore()
+const { setPreference } = useAnalysisPreference()
+const ticketTask = useTicketTask()
 
 // ── Types ────────────────────────────────────────────────────
 interface Leg {
@@ -17,8 +22,15 @@ interface Leg {
   away_team: string
   league: string
   kickoff?: string              // "20:00"
+  market?: string               // "胜平负" | "让球胜平负"
+  handicap?: number             // 让球数，正=主让，负=受让
+  handicap_label?: string       // 格式化让球字符串，如 "+0.5" / "-1"
   pick: string
-  pick_code?: string            // 投注代码 "3"/"1"/"0"
+  pick_code?: string            // 投注代码 "3"/"1"/"0"（主选）
+  picks?: string[]              // 全部选项，如 ["主胜","平"]（多选时）
+  pick_codes?: string[]         // 对应投注代码列表
+  picks_odds?: number[]         // 每个选项的赔率
+  num_picks?: number            // 本腿选了几个结果
   odds?: number
   odds_estimated?: boolean
   confidence?: number
@@ -29,6 +41,7 @@ interface Scheme {
   legs: Leg[]
   total_odds?: number
   stake?: number
+  num_combos?: number
   risk_label?: string
   rationale?: string
   parlay_type?: string
@@ -45,6 +58,14 @@ interface Schemes {
 // ── State ────────────────────────────────────────────────────
 const totalMatchCount = ref(0)
 const generating = ref(false)
+
+// Analysis freshness
+const analysisLatestAt = ref<string | null>(null)
+const modelCount = ref(1)
+const sheetVisible = ref(false)
+const pendingMatchIds = ref<number[]>([])
+const currentMatchName = ref('')
+
 const schemes = ref<Schemes | null>(null)
 const activeTab = ref<'conservative' | 'balanced' | 'high_odds' | 'scoreline'>('conservative')
 const error = ref<string | null>(null)
@@ -52,11 +73,13 @@ const progressIndex = ref(0)
 const progressMsg = ref('')
 const elapsedSecs = ref(0)
 const lastMatchIds = ref<number[]>([])
-const completedSteps = ref(0)   // steps completed in last run (0 = not run yet)
+const completedSteps = ref(0)
 const stepLogExpanded = ref(false)
-const stepLog = ref<string[]>([])      // per-step detail messages from SSE
-const localMultiplier = ref(1)        // 倍数 (× 2元/注), integer ≥ 1
+const stepLog = ref<string[]>([])
+const localMultiplier = ref(1)
 let _elapsedTimer: ReturnType<typeof setInterval> | null = null
+let _pollTimer: ReturnType<typeof setInterval> | null = null
+let _lastEventIndex = 0
 
 const TABS = [
   { key: 'conservative' as const, label: '稳健', risk: '低风险' },
@@ -109,94 +132,152 @@ function pickLabel(pick: string) {
   return pick
 }
 
-// ── Generate via SSE ─────────────────────────────────────────
-async function generate(matchIds: number[], force = false) {
-  if (!matchIds.length || generating.value) return
-  lastMatchIds.value = matchIds
-  generating.value = true
+// ── Analysis freshness helpers ────────────────────────────────
+async function fetchAnalysisStatus(matchIds?: number[]) {
+  try {
+    const params: Record<string, string> = {}
+    if (matchIds?.length) params.match_ids = matchIds.join(',')
+    const { data } = await api.get('/predictions/analysis-status', { params })
+    analysisLatestAt.value = data.latest_at ?? null
+  } catch {
+    // silent — freshness is non-critical
+  }
+}
+
+async function fetchModelCount() {
+  try {
+    const { data } = await api.get('/settings/llm')
+    modelCount.value = Array.isArray(data) ? Math.max(1, data.length) : 1
+  } catch { /* silent */ }
+}
+
+// ── Task-based generation with polling ───────────────────────
+
+function _resetProgressState() {
   error.value = null
   schemes.value = null
   progressIndex.value = 0
   progressMsg.value = '准备中…'
+  currentMatchName.value = ''
   elapsedSecs.value = 0
   completedSteps.value = 0
   stepLogExpanded.value = false
   stepLog.value = new Array(STEPS.length).fill('')
-  _elapsedTimer = setInterval(() => { elapsedSecs.value++ }, 1000)
+  _lastEventIndex = 0
+}
 
+function stopPolling() {
+  if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null }
+  if (_elapsedTimer) { clearInterval(_elapsedTimer); _elapsedTimer = null }
+  generating.value = false
+  currentMatchName.value = ''
+  ticketTask.clear()
+  fetchAnalysisStatus(lastMatchIds.value)
+}
+
+async function _poll(taskId: string) {
   try {
-    const token = localStorage.getItem('token') ?? ''
-    const res = await fetch('/api/tickets/stream', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`,
-      },
-      body: JSON.stringify({ match_ids: matchIds, force }),
-      signal: AbortSignal.timeout(600_000),
-    })
+    const { data } = await api.get(`/tickets/task/${taskId}`)
+    const newEvents = (data.events as any[]).slice(_lastEventIndex)
+    _lastEventIndex = (data.events as any[]).length
 
-    if (!res.ok) {
-      let detail = '生成失败，请检查 LLM 配置后重试'
-      try { detail = (await res.json()).detail ?? detail } catch { /* ignore */ }
-      if (res.status === 401) {
-        localStorage.removeItem('token')
-        window.location.href = `/login?redirect=${encodeURIComponent(window.location.pathname)}`
+    for (const ev of newEvents) {
+      if (ev.event === 'step') {
+        const idx = ev.index ?? 0
+        progressIndex.value = idx
+        progressMsg.value = ev.msg ?? ''
+        if (ev.match_name) currentMatchName.value = ev.match_name
+        if (ev.msg) stepLog.value[idx] = ev.msg
+      } else if (ev.event === 'done') {
+        // result is in data.result (written to Redis separately)
+        if (data.result) {
+          schemes.value = data.result
+          for (const t of TABS) {
+            if (data.result?.[t.key]?.legs?.length) { activeTab.value = t.key; break }
+          }
+          completedSteps.value = STEPS.length
+          if (ev.summary) stepLog.value[STEPS.length - 1] = ev.summary
+          bettingStore.save(data.result, activeTab.value, lastMatchIds.value)
+          stopPolling()
+          return
+        }
+        // result not yet written — wait one more tick
+      } else if (ev.event === 'error') {
+        completedSteps.value = progressIndex.value
+        if (ev.msg) stepLog.value[progressIndex.value] = `失败: ${ev.msg}`
+        error.value = ev.msg ?? '未知错误'
+        stopPolling()
         return
       }
-      throw new Error(detail)
     }
 
-    const reader = res.body!.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-      const lines = buffer.split('\n')
-      buffer = lines.pop() ?? ''
-
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue
-        try {
-          const ev = JSON.parse(line.slice(6))
-          if (ev.event === 'step') {
-            const idx = ev.index ?? 0
-            progressIndex.value = idx
-            progressMsg.value = ev.msg ?? ''
-            if (ev.msg) stepLog.value[idx] = ev.msg
-          } else if (ev.event === 'done') {
-            schemes.value = ev.schemes
-            for (const t of TABS) {
-              if (ev.schemes?.[t.key]?.legs?.length) { activeTab.value = t.key; break }
-            }
-            completedSteps.value = STEPS.length
-            if (ev.summary) stepLog.value[STEPS.length - 1] = ev.summary
-            bettingStore.save(ev.schemes, activeTab.value, lastMatchIds.value)
-          } else if (ev.event === 'error') {
-            completedSteps.value = progressIndex.value
-            if (ev.msg) stepLog.value[progressIndex.value] = `失败: ${ev.msg}`
-            error.value = ev.msg ?? '未知错误'
-          }
-        } catch { /* skip malformed */ }
+    // Safety: done event was consumed in a previous tick but result arrived late
+    if (!schemes.value && data.result) {
+      schemes.value = data.result
+      for (const t of TABS) {
+        if (data.result?.[t.key]?.legs?.length) { activeTab.value = t.key; break }
       }
+      completedSteps.value = STEPS.length
+      bettingStore.save(data.result, activeTab.value, lastMatchIds.value)
+      stopPolling()
+      return
     }
 
-    // 流结束但仍无方案且无错误，给出提示
-    if (!schemes.value && !error.value) {
-      error.value = '未收到方案数据，请稍后重试'
+    // Safety: status=done but result never arrived (Redis write failure)
+    if (data.status === 'done' && !data.result && !schemes.value) {
+      error.value = '方案数据写入失败，请重新生成'
+      stopPolling()
+      return
+    }
+
+    // Safety: status error with no error event yet
+    if (data.status === 'error' && !error.value && newEvents.length === 0) {
+      error.value = '任务执行失败，请稍后重试'
+      stopPolling()
     }
   } catch (e: any) {
-    if (e.name === 'TimeoutError' || e.name === 'AbortError') {
-      error.value = '分析超时，请减少场次后重试（建议 ≤10 场）'
-    } else {
-      error.value = e.message || '生成失败，请检查 LLM 配置后重试'
+    if (e.response?.status === 404) {
+      error.value = '分析任务已过期（24h），请重新生成'
+      stopPolling()
     }
-  } finally {
+    // transient network errors: continue polling
+  }
+}
+
+function startPolling(taskId: string) {
+  generating.value = true
+  if (!_elapsedTimer) {
+    _elapsedTimer = setInterval(() => { elapsedSecs.value++ }, 1000)
+  }
+  // immediate first poll, then every 2s
+  _poll(taskId)
+  _pollTimer = setInterval(() => _poll(taskId), 2000)
+}
+
+async function generate(matchIds: number[], force = false, analyzeAll = false) {
+  if (!matchIds.length || generating.value) return
+  lastMatchIds.value = matchIds
+  generating.value = true
+  _resetProgressState()
+
+  try {
+    const { data } = await api.post('/tickets/task', {
+      match_ids: matchIds,
+      force,
+      analyze_all: analyzeAll,
+      multiplier: localMultiplier.value,
+    })
+    ticketTask.save(data.task_id, matchIds)
+    startPolling(data.task_id)
+  } catch (e: any) {
     generating.value = false
     if (_elapsedTimer) { clearInterval(_elapsedTimer); _elapsedTimer = null }
+    if (e.response?.status === 401) {
+      localStorage.removeItem('token')
+      window.location.href = `/login?redirect=${encodeURIComponent(window.location.pathname)}`
+      return
+    }
+    error.value = e.response?.data?.detail ?? e.message ?? '生成失败，请检查 LLM 配置后重试'
   }
 }
 
@@ -204,9 +285,24 @@ async function generateAll() {
   try {
     const { data } = await api.get('/matches/', { params: { sale_date: 'all' } })
     const ids = (data as { id: number }[]).map(m => m.id)
-    await generate(ids)
+    pendingMatchIds.value = ids
+    // Refresh latest_at for these matches before showing sheet
+    await fetchAnalysisStatus(ids)
+    sheetVisible.value = true
   } catch {
     error.value = '加载赛事失败，请稍后重试'
+  }
+}
+
+async function onSheetSelect(mode: AnalysisMode) {
+  sheetVisible.value = false
+  setPreference(mode)
+  const ids = pendingMatchIds.value
+  if (!ids.length) return
+  if (mode === 'cache') {
+    await generate(ids, false, true)
+  } else {
+    await generate(ids, true, true)
   }
 }
 
@@ -294,6 +390,20 @@ onMounted(async () => {
     totalMatchCount.value = (data as unknown[]).length
   } catch { /* silent */ }
 
+  // Non-critical parallel fetches
+  fetchAnalysisStatus()
+  fetchModelCount()
+
+  // Recover in-progress task from previous session (navigation away / refresh)
+  const saved = ticketTask.getSaved()
+  if (saved) {
+    lastMatchIds.value = saved.matchIds
+    _resetProgressState()
+    progressMsg.value = '恢复中…'
+    startPolling(saved.taskId)
+    return
+  }
+
   const idsQuery = route.query.ids as string | undefined
   if (idsQuery) {
     const ids = idsQuery.split(',').map(Number).filter(Boolean)
@@ -302,8 +412,13 @@ onMounted(async () => {
     schemes.value = bettingStore.schemes
     activeTab.value = bettingStore.activeTab
     lastMatchIds.value = bettingStore.lastMatchIds
-    // 不恢复 completedSteps — 日志为空时不显示日志按钮
   }
+})
+
+onUnmounted(() => {
+  // Stop polling loop on navigation — keep localStorage so we can recover on return
+  if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null }
+  if (_elapsedTimer) { clearInterval(_elapsedTimer); _elapsedTimer = null }
 })
 </script>
 
@@ -346,6 +461,13 @@ onMounted(async () => {
         </svg>
         一键生成方案
       </button>
+      <div class="analysis-ts" v-if="analysisLatestAt">
+        <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+          <circle cx="8" cy="8" r="6.5"/>
+          <path d="M8 4.5V8l2.5 2"/>
+        </svg>
+        最早分析于 {{ new Date(analysisLatestAt).toLocaleTimeString('zh-CN', { hour:'2-digit', minute:'2-digit' }) }}
+      </div>
 
       <button class="custom-select-btn" @click="goCustomSelect">
         <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -376,9 +498,19 @@ onMounted(async () => {
         <div class="spin-ring" />
         <div class="gen-loading-text">
           <div class="gen-loading-title">正在生成方案…</div>
-          <div class="gen-loading-sub">{{ progressMsg || '统计建模 · 情报融合 · 多模型投票' }}</div>
+          <div class="gen-loading-sub">
+        {{ currentMatchName ? `分析中：${currentMatchName}` : (progressMsg || '统计建模 · 情报融合 · 多模型投票') }}
+      </div>
         </div>
-        <div class="gen-elapsed font-num">{{ elapsedSecs }}s</div>
+        <div class="gen-loading-right">
+          <div class="gen-elapsed font-num">{{ elapsedSecs }}s</div>
+          <button class="gen-stop-btn" type="button" @click="stopPolling" title="停止生成">
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor" aria-hidden="true">
+              <rect x="3" y="3" width="8" height="8" rx="1.5"/>
+            </svg>
+            停止
+          </button>
+        </div>
       </div>
       <div class="gen-loading-steps">
         <div
@@ -490,6 +622,9 @@ onMounted(async () => {
             <span class="scheme-parlay font-num">
               {{ activeScheme.parlay_type || `${activeScheme.legs?.length}串1` }}
             </span>
+            <span v-if="activeScheme.num_combos && activeScheme.num_combos > 1" class="scheme-combos font-num">
+              共{{ activeScheme.num_combos }}注
+            </span>
           </div>
           <span class="risk-badge" :class="activeTab">{{ activeScheme.risk_label || activeTabInfo.risk }}</span>
         </div>
@@ -530,8 +665,23 @@ onMounted(async () => {
               <div v-if="leg.rationale" class="leg-rationale">{{ leg.rationale }}</div>
             </div>
             <div class="leg-pick-col">
-              <span class="leg-pick" :class="pickColorClass(leg.pick)">{{ pickLabel(leg.pick) }}</span>
-              <span v-if="leg.pick_code" class="leg-pick-code font-num">{{ leg.pick_code }}</span>
+              <span v-if="leg.market === '让球胜平负'" class="leg-hhad-badge">让</span>
+              <!-- Multi-pick: render each outcome as a separate badge -->
+              <template v-if="leg.picks && leg.picks.length > 1">
+                <span
+                  v-for="(p, pi) in leg.picks"
+                  :key="pi"
+                  class="leg-pick"
+                  :class="pickColorClass(p)"
+                >{{ pickLabel(p) }}</span>
+                <span class="leg-pick-code font-num">{{ leg.pick_codes?.join('/') }}</span>
+              </template>
+              <!-- Single pick -->
+              <template v-else>
+                <span class="leg-pick" :class="pickColorClass(leg.pick)">{{ pickLabel(leg.pick) }}</span>
+                <span v-if="leg.pick_code" class="leg-pick-code font-num">{{ leg.pick_code }}</span>
+              </template>
+              <span v-if="leg.handicap_label" class="leg-handicap font-num">{{ leg.handicap_label }}</span>
             </div>
             <div class="leg-odds-col">
               <span v-if="leg.odds" class="leg-odds font-num" :class="{ 'leg-odds--est': leg.odds_estimated }">
@@ -615,6 +765,16 @@ onMounted(async () => {
     </div>
 
   </div>
+
+  <!-- ── Analysis mode sheet ──────────────────────────────────── -->
+  <AnalysisModeSheet
+    :visible="sheetVisible"
+    :latest-at="analysisLatestAt"
+    :match-count="pendingMatchIds.length || totalMatchCount"
+    :model-count="modelCount"
+    @select="onSheetSelect"
+    @cancel="sheetVisible = false"
+  />
 
   <!-- ── 标记投注 Sheet ────────────────────────────────────────── -->
   <Teleport to="body">
@@ -773,6 +933,16 @@ onMounted(async () => {
 }
 .gen-all-btn:active { opacity: .82; transform: scale(0.96); }
 
+.analysis-ts {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text3);
+  margin-top: -4px;
+  margin-bottom: 8px;
+}
+
 .custom-select-btn {
   display: flex;
   align-items: center;
@@ -840,7 +1010,17 @@ onMounted(async () => {
 
 .gen-loading-title { font-size: 13px; font-weight: 700; }
 .gen-loading-sub { font-size: 11px; color: var(--text3); margin-top: 3px; line-height: 1.5; }
-.gen-elapsed { font-size: 11px; color: var(--text3); margin-left: auto; flex-shrink: 0; }
+.gen-loading-right { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; margin-left: auto; flex-shrink: 0; }
+.gen-elapsed { font-size: 11px; color: var(--text3); }
+.gen-stop-btn {
+  display: flex; align-items: center; gap: 4px;
+  font-size: 11px; font-weight: 600;
+  padding: 4px 10px; border-radius: 6px;
+  border: 1px solid rgba(239,68,68,.4);
+  color: #f87171; background: rgba(239,68,68,.08);
+  cursor: pointer; white-space: nowrap;
+}
+.gen-stop-btn:active { background: rgba(239,68,68,.18); }
 
 .gen-loading-steps { display: flex; flex-direction: column; padding: 4px 0; }
 .step-item {
@@ -952,6 +1132,12 @@ onMounted(async () => {
 .scheme-card-head-left { display: flex; align-items: center; gap: 8px; }
 .scheme-name { font-size: 13px; font-weight: 700; }
 .scheme-parlay { font-size: 11px; color: var(--text3); }
+.scheme-combos {
+  font-size: 10px; font-weight: 700;
+  padding: 1px 6px; border-radius: 3px;
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
+  color: var(--primary);
+}
 
 .risk-badge { font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 4px; }
 .risk-badge.conservative { background: color-mix(in srgb, var(--green, #22c55e) 12%, transparent); color: var(--green, #22c55e); }
@@ -1001,6 +1187,8 @@ onMounted(async () => {
 .leg-pick-col { min-width: 36px; flex-shrink: 0; display: flex; flex-direction: column; align-items: center; gap: 3px; padding-top: 1px; }
 .leg-pick { font-size: 11px; font-weight: 700; padding: 3px 7px; border-radius: 4px; white-space: nowrap; }
 .leg-pick-code { font-size: 11px; font-weight: 700; color: var(--text3); }
+.leg-hhad-badge { font-size: 9px; font-weight: 700; padding: 1px 4px; border-radius: 3px; background: var(--draw-bg); color: var(--draw-c); letter-spacing: .3px; }
+.leg-handicap { font-size: 10px; color: var(--draw-c); font-weight: 600; }
 
 .leg-odds-col { min-width: 40px; flex-shrink: 0; text-align: right; display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
 .leg-odds { font-family: var(--font-disp); font-size: 17px; font-weight: 700; line-height: 1; letter-spacing: -.2px; color: var(--primary); }

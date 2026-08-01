@@ -74,6 +74,13 @@ async def sync_daily_matches(session: AsyncSession, target_date: date) -> int:
                 match.sporttery_odds_open = stored_odds
             match.updated_at = datetime.utcnow()
 
+        # 若 API 返回赛果字段且尚未锁定，写入实际结果
+        api_result = row.get("actual_result")
+        if api_result and not match.result_locked:
+            match.actual_result = api_result
+            match.actual_score = row.get("actual_score") or match.actual_score
+            match.result_locked = True
+
         upserted += 1
 
     await session.commit()
