@@ -1,3 +1,33 @@
+@import "tailwindcss";
+@plugin "tailwindcss-animate";
+
+/* shadcn-vue color utilities — maps CSS vars to Tailwind v4 @theme tokens */
+@theme {
+  --color-background:         rgb(var(--background));
+  --color-foreground:         rgb(var(--foreground));
+  --color-card:               var(--card);
+  --color-card-foreground:    rgb(var(--card-foreground));
+  --color-popover:            rgb(var(--popover));
+  --color-popover-foreground: rgb(var(--popover-foreground));
+  --color-primary:            var(--primary);
+  --color-primary-foreground: rgb(var(--primary-foreground));
+  --color-secondary:          rgb(var(--secondary));
+  --color-secondary-foreground: rgb(var(--secondary-foreground));
+  --color-muted:              rgb(var(--muted));
+  --color-muted-foreground:   rgb(var(--muted-foreground));
+  --color-accent:             rgb(var(--accent));
+  --color-accent-foreground:  rgb(var(--accent-foreground));
+  --color-destructive:        rgb(var(--destructive));
+  --color-destructive-foreground: rgb(var(--destructive-foreground));
+  --color-ring:               rgb(var(--ring));
+  /* border/input rendered with low opacity — raw 0,0,0 or 255,255,255 */
+  --color-border:             rgb(var(--border) / 0.10);
+  --color-input:              rgb(var(--input) / 0.10);
+  --radius-sm:   calc(var(--radius) - 2px);
+  --radius-md:   var(--radius);
+  --radius-lg:   calc(var(--radius) + 2px);
+}
+
 /* ══════════════════════════════════════════════════
    SPORTTERY ADVISOR — Design System (Theme D: 报纸体育版)
    Barlow Condensed display · Noto Sans SC body
@@ -46,6 +76,25 @@
   --badge-gray-bg:   #F3F4F6;   --badge-gray-c:   #6B7280;
   --badge-green-bg:  #DCFCE7;   --badge-green-c:  #15803D;
   --badge-gold-bg:   #FEF3C7;   --badge-gold-c:   var(--gold);
+
+  /* shadcn-vue theme variables — RGB channels for rgb(var() / alpha) compositing */
+  --background:           251 248 245;   /* #FAF8F5 */
+  --foreground:           17 17 17;      /* #111111 */
+  --card-foreground:      17 17 17;
+  --popover:              255 255 255;
+  --popover-foreground:   17 17 17;
+  --primary-foreground:   255 255 255;
+  --secondary:            243 244 246;
+  --secondary-foreground: 85 85 85;
+  --muted:                243 244 246;
+  --muted-foreground:     153 153 153;   /* --text3 */
+  --accent:               255 245 245;   /* --primary-d */
+  --accent-foreground:    197 48 48;
+  --destructive:          197 48 48;
+  --destructive-foreground: 255 255 255;
+  --border:               0 0 0;        /* used as rgba with opacity */
+  --input:                0 0 0;
+  --ring:                 197 48 48;
 }
 
 /* Dark mode — OS preference auto-applies; .dark class allows manual override */
@@ -76,6 +125,25 @@
     --badge-green-bg:  #14532d;              --badge-green-c:  #4ADE80;
     --badge-gold-bg:   #422006;              --badge-gold-c:   #FCD34D;
     --fab-sh:          0 4px 20px rgba(248,113,113,.28);
+
+    /* shadcn-vue dark mode — RGB channels (--card and --primary inherit from project tokens) */
+    --background:           26 24 20;      /* #1A1814 */
+    --foreground:           245 240 232;   /* #F5F0E8 */
+    --card-foreground:      245 240 232;
+    --popover:              36 33 24;
+    --popover-foreground:   245 240 232;
+    --primary-foreground:   255 255 255;
+    --secondary:            42 40 38;      /* #2A2826 */
+    --secondary-foreground: 160 144 112;
+    --muted:                42 40 38;
+    --muted-foreground:     107 96 80;     /* --text3 dark */
+    --accent:               61 21 21;      /* --primary-d dark */
+    --accent-foreground:    248 113 113;
+    --destructive:          248 113 113;
+    --destructive-foreground: 255 255 255;
+    --border:               255 255 255;
+    --input:                255 255 255;
+    --ring:                 248 113 113;
   }
 }
 .dark {
@@ -104,6 +172,25 @@
   --badge-green-bg:  #14532d;              --badge-green-c:  #4ADE80;
   --badge-gold-bg:   #422006;              --badge-gold-c:   #FCD34D;
   --fab-sh:          0 4px 20px rgba(248,113,113,.28);
+
+  /* shadcn-vue dark mode — RGB channels (--card and --primary inherit from project tokens) */
+  --background:           26 24 20;
+  --foreground:           245 240 232;
+  --card-foreground:      245 240 232;
+  --popover:              36 33 24;
+  --popover-foreground:   245 240 232;
+  --primary-foreground:   255 255 255;
+  --secondary:            42 40 38;
+  --secondary-foreground: 160 144 112;
+  --muted:                42 40 38;
+  --muted-foreground:     107 96 80;
+  --accent:               61 21 21;
+  --accent-foreground:    248 113 113;
+  --destructive:          248 113 113;
+  --destructive-foreground: 255 255 255;
+  --border:               255 255 255;
+  --input:                255 255 255;
+  --ring:                 248 113 113;
 }
 
 /* ─── Reset ─── */

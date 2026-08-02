@@ -2,6 +2,9 @@
 import { ref, onMounted, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import api from '@/api'
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from '@/components/ui/select'
 
 const route = useRoute()
 
@@ -14,7 +17,7 @@ const messages = ref<Message[]>([])
 const input = ref('')
 const sending = ref(false)
 const chatEl = ref<HTMLElement | null>(null)
-const selectedMatch = ref<number | null>(null)
+const selectedMatch = ref<string | null>(null)
 const matches = ref<any[]>([])
 
 async function loadMatches() {
@@ -25,9 +28,9 @@ async function loadMatches() {
     matches.value = data
     const qid = route.query.match ? Number(route.query.match) : null
     if (qid && data.find((m: any) => m.id === qid)) {
-      selectedMatch.value = qid
+      selectedMatch.value = String(qid)
     } else if (data.length) {
-      selectedMatch.value = data[0].id
+      selectedMatch.value = String(data[0].id)
     }
   } catch {
     matches.value = []
@@ -56,7 +59,7 @@ async function send() {
       },
       body: JSON.stringify({
         message: text,
-        match_id: selectedMatch.value,
+        match_id: selectedMatch.value ? Number(selectedMatch.value) : null,
         history: messages.value.slice(0, -2).map((m) => ({ role: m.role, content: m.content })),
       }),
     })
@@ -120,11 +123,16 @@ onMounted(loadMatches)
     <!-- Match selector -->
     <div class="match-sel-bar">
       <label class="field-label" for="match-sel" style="margin:0;white-space:nowrap">比赛</label>
-      <select id="match-sel" v-model="selectedMatch" class="input" style="max-width:280px;font-size:12px;padding:5px 10px">
-        <option v-for="m in matches" :key="m.id" :value="m.id">
-          {{ m.home_team }} vs {{ m.away_team }}
-        </option>
-      </select>
+      <Select v-model="selectedMatch">
+        <SelectTrigger id="match-sel" class="input" style="max-width:280px;font-size:12px;padding:5px 10px;height:auto">
+          <SelectValue placeholder="选择比赛" />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem v-for="m in matches" :key="m.id" :value="String(m.id)">
+            {{ m.home_team }} vs {{ m.away_team }}
+          </SelectItem>
+        </SelectContent>
+      </Select>
     </div>
 
     <!-- Messages -->

@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import { ref, watch, onMounted } from 'vue'
+import { toast } from 'vue-sonner'
 import api from '@/api'
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from '@/components/ui/select'
 
 // ── Types ──────────────────────────────────────────────────────────────────
 interface LLMConfig {
@@ -69,12 +73,9 @@ const testingLLM = ref<number | null>(null)
 const testingWebhook = ref(false)
 const llmResult = ref<Record<number, { ok: boolean; msg: string }>>({})
 
-const toast = ref<{ msg: string; type: 'ok' | 'err' } | null>(null)
-let toastTimer: ReturnType<typeof setTimeout>
 function showToast(msg: string, type: 'ok' | 'err' = 'ok') {
-  clearTimeout(toastTimer)
-  toast.value = { msg, type }
-  toastTimer = setTimeout(() => { toast.value = null }, 3000)
+  if (type === 'ok') toast.success(msg)
+  else toast.error(msg)
 }
 
 // ── Constants ──────────────────────────────────────────────────────────────
@@ -435,18 +436,6 @@ onMounted(load)
 
 <template>
   <div class="view">
-    <!-- Toast -->
-    <transition name="toast-slide">
-      <div v-if="toast" class="s-toast" :class="toast.type === 'err' ? 's-toast--err' : ''">
-        <svg v-if="toast.type === 'ok'" width="14" height="14" viewBox="0 0 20 20" fill="currentColor">
-          <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/>
-        </svg>
-        <svg v-else width="14" height="14" viewBox="0 0 20 20" fill="currentColor">
-          <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clip-rule="evenodd"/>
-        </svg>
-        {{ toast.msg }}
-      </div>
-    </transition>
 
     <!-- Tab bar -->
     <div class="s-tabs">
@@ -483,9 +472,14 @@ onMounted(load)
             <span v-if="llmConfigs.length" class="lc-count">{{ llmConfigs.length }}</span>
           </div>
           <div class="lc-bar-r">
-            <select v-model="newProvider" class="lc-pick">
-              <option v-for="p in PROVIDERS" :key="p" :value="p">{{ PROVIDER_META[p]?.label ?? p }}</option>
-            </select>
+            <Select v-model="newProvider">
+              <SelectTrigger class="lc-pick">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem v-for="p in PROVIDERS" :key="p" :value="p">{{ PROVIDER_META[p]?.label ?? p }}</SelectItem>
+              </SelectContent>
+            </Select>
             <button class="lc-add" @click="addLLM">
               <svg width="11" height="11" viewBox="0 0 20 20" fill="currentColor">
                 <path fill-rule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" clip-rule="evenodd"/>
@@ -546,9 +540,14 @@ onMounted(load)
                 <div class="lc-g2">
                   <div class="lc-field">
                     <label class="lc-lbl">服务商</label>
-                    <select v-model="cfg.provider" class="lc-inp lc-sel" @change="onProviderChange(cfg)">
-                      <option v-for="p in PROVIDERS" :key="p" :value="p">{{ PROVIDER_META[p]?.label ?? p }}</option>
-                    </select>
+                    <Select v-model="cfg.provider" @update:model-value="onProviderChange(cfg)">
+                      <SelectTrigger class="lc-inp lc-sel">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem v-for="p in PROVIDERS" :key="p" :value="p">{{ PROVIDER_META[p]?.label ?? p }}</SelectItem>
+                      </SelectContent>
+                    </Select>
                   </div>
                   <div class="lc-field">
                     <div class="lc-lbl-row">
@@ -562,10 +561,15 @@ onMounted(load)
                         {{ modelLists['live-' + cfg.id] ? modelLists['live-' + cfg.id].length + ' 个' : '刷新' }}
                       </button>
                     </div>
-                    <select v-if="modelOptions(cfg).length > 0" v-model="cfg.model" class="lc-inp lc-sel">
-                      <option v-if="cfg.model && !modelOptions(cfg).includes(cfg.model)" :value="cfg.model">{{ cfg.model }}</option>
-                      <option v-for="m in modelOptions(cfg)" :key="m" :value="m">{{ m }}</option>
-                    </select>
+                    <Select v-if="modelOptions(cfg).length > 0" v-model="cfg.model">
+                      <SelectTrigger class="lc-inp lc-sel">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem v-if="cfg.model && !modelOptions(cfg).includes(cfg.model)" :value="cfg.model">{{ cfg.model }}</SelectItem>
+                        <SelectItem v-for="m in modelOptions(cfg)" :key="m" :value="m">{{ m }}</SelectItem>
+                      </SelectContent>
+                    </Select>
                     <input v-else v-model="cfg.model" class="lc-inp lc-mono"
                       :placeholder="PROVIDER_META[cfg.provider]?.default_model || 'model-id'" />
                   </div>
@@ -715,9 +719,14 @@ onMounted(load)
             <div class="s-form-grid">
               <div class="field">
                 <label class="field-label">推送类型</label>
-                <select v-model="webhook.webhook_type" class="input">
-                  <option v-for="t in WEBHOOK_TYPES" :key="t.value" :value="t.value">{{ t.label }}</option>
-                </select>
+                <Select v-model="webhook.webhook_type">
+                  <SelectTrigger class="input">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem v-for="t in WEBHOOK_TYPES" :key="t.value" :value="t.value">{{ t.label }}</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
               <div class="field">
                 <label class="field-label">状态</label>
@@ -771,10 +780,15 @@ onMounted(load)
             <div class="s-ens-grid">
               <div class="field">
                 <label class="field-label">参与模型</label>
-                <select v-model="ensemble.models" class="input">
-                  <option value="all">全部已配置模型</option>
-                  <option value="default">仅默认模型</option>
-                </select>
+                <Select v-model="ensemble.models">
+                  <SelectTrigger class="input">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">全部已配置模型</SelectItem>
+                    <SelectItem value="default">仅默认模型</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
               <div class="field">
                 <label class="field-label">
@@ -1643,30 +1657,6 @@ onMounted(load)
 }
 .s-toggle input:checked + .s-toggle-track .s-toggle-thumb { transform: translateX(14px); }
 
-/* ── Toast ───────────────────────────────────────────────────────────────── */
-.s-toast {
-  position: fixed;
-  bottom: calc(64px + env(safe-area-inset-bottom, 0px));
-  left: 50%;
-  transform: translateX(-50%);
-  background: var(--text);
-  color: var(--card);
-  font-size: 12px;
-  font-weight: 500;
-  padding: 7px 14px;
-  border-radius: var(--radius-pill);
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  z-index: 999;
-  white-space: nowrap;
-  box-shadow: 0 4px 16px rgba(0,0,0,.2);
-}
-.s-toast--err { background: var(--primary); }
-
-.toast-slide-enter-active, .toast-slide-leave-active { transition: opacity .2s, transform .2s; }
-.toast-slide-enter-from, .toast-slide-leave-to { opacity: 0; transform: translateX(-50%) translateY(8px); }
-
 /* ── Accordion body transition ───────────────────────────────────────────── */
 .ds-body-enter-active { transition: opacity .18s ease, transform .18s ease; }
 .ds-body-leave-active { transition: opacity .12s ease, transform .12s ease; }
@@ -1686,11 +1676,6 @@ onMounted(load)
 
 /* Inline DS toggle (no label text) */
 .s-ds-toggle { margin-left: 2px; }
-
-/* ── Toast desktop position ──────────────────────────────────────────────── */
-@media (min-width: 768px) {
-  .s-toast { bottom: 20px; }
-}
 
 /* ── Model refresh button (inside field-label) ───────────────────────────── */
 .s-refresh-btn {

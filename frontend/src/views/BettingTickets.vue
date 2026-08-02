@@ -6,6 +6,9 @@ import { useBettingStore } from '@/stores/betting'
 import AnalysisModeSheet from '@/components/AnalysisModeSheet.vue'
 import { useAnalysisPreference, type AnalysisMode } from '@/composables/useAnalysisPreference'
 import { useTicketTask } from '@/composables/useTicketTask'
+import {
+  Sheet, SheetContent, SheetHeader, SheetTitle, SheetFooter,
+} from '@/components/ui/sheet'
 
 const router = useRouter()
 const route = useRoute()
@@ -335,8 +338,10 @@ interface BetSheet {
   error: string | null
 }
 const betSheet = ref<BetSheet>({ visible: false, planId: '', stake: 20, submitting: false, done: false, error: null })
+let betSheetTimer: ReturnType<typeof setTimeout> | null = null
 
 function openBetSheet(planId: string) {
+  if (betSheetTimer) { clearTimeout(betSheetTimer); betSheetTimer = null }
   const scheme = schemes.value?.[planId as keyof typeof schemes.value] as { stake?: number } | undefined
   betSheet.value = {
     visible: true,
@@ -348,6 +353,7 @@ function openBetSheet(planId: string) {
   }
 }
 function closeBetSheet() {
+  if (betSheetTimer) { clearTimeout(betSheetTimer); betSheetTimer = null }
   betSheet.value.visible = false
 }
 
@@ -376,7 +382,7 @@ async function confirmBet() {
       expected_payout: Math.round(sheet.stake * (scheme.total_odds ?? 1) * 100) / 100,
     })
     sheet.done = true
-    setTimeout(() => { sheet.visible = false }, 1400)
+    betSheetTimer = setTimeout(() => { sheet.visible = false; betSheetTimer = null }, 1400)
   } catch (e: any) {
     sheet.error = e.response?.data?.detail ?? '提交失败，请稍后重试'
   } finally {
@@ -768,66 +774,60 @@ onUnmounted(() => {
 
   <!-- ── Analysis mode sheet ──────────────────────────────────── -->
   <AnalysisModeSheet
-    :visible="sheetVisible"
+    v-model:open="sheetVisible"
     :latest-at="analysisLatestAt"
     :match-count="pendingMatchIds.length || totalMatchCount"
     :model-count="modelCount"
     @select="onSheetSelect"
-    @cancel="sheetVisible = false"
   />
 
   <!-- ── 标记投注 Sheet ────────────────────────────────────────── -->
-  <Teleport to="body">
-    <Transition name="sheet">
-      <div v-if="betSheet.visible" class="sheet-backdrop" @click.self="closeBetSheet">
-        <div class="sheet-panel">
-          <!-- Success state -->
-          <div v-if="betSheet.done" class="sheet-done">
-            <svg width="36" height="36" viewBox="0 0 36 36" fill="none" stroke="#22c55e" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="18" cy="18" r="16"/>
-              <polyline points="11,18 16,23 25,13"/>
-            </svg>
-            <p>投注记录已保存</p>
-          </div>
-          <!-- Form state -->
-          <template v-else>
-            <div class="sheet-header">
-              <div class="sheet-title">标记投注 · {{ { conservative:'稳健', balanced:'均衡', high_odds:'博高赔', scoreline:'比分' }[betSheet.planId] || betSheet.planId }}方案</div>
-              <button class="sheet-close" @click="closeBetSheet">
-                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-                  <path d="M1 1l12 12M13 1L1 13"/>
-                </svg>
-              </button>
-            </div>
-            <div class="sheet-body">
-              <p class="sheet-desc">记录您实际购买的注额，AI 将追踪命中情况</p>
-              <label class="sheet-label">投注金额（元）</label>
-              <div class="sheet-stake-row">
-                <button class="stake-adj" @click="betSheet.stake = Math.max(2, betSheet.stake - 2)">−</button>
-                <input
-                  v-model.number="betSheet.stake"
-                  class="stake-input"
-                  type="number"
-                  min="2"
-                  max="10000"
-                  step="2"
-                />
-                <button class="stake-adj" @click="betSheet.stake = Math.min(10000, betSheet.stake + 2)">+</button>
-              </div>
-              <div v-if="betSheet.error" class="sheet-error">{{ betSheet.error }}</div>
-            </div>
-            <div class="sheet-footer">
-              <button class="sheet-cancel" @click="closeBetSheet">取消</button>
-              <button class="sheet-confirm" :disabled="betSheet.submitting" @click="confirmBet">
-                <span v-if="betSheet.submitting" class="btn-spin" />
-                {{ betSheet.submitting ? '保存中…' : '确认已购买' }}
-              </button>
-            </div>
-          </template>
-        </div>
+  <Sheet :open="betSheet.visible" @update:open="(v) => { if (!v) closeBetSheet() }">
+    <SheetContent side="bottom" class="rounded-t-2xl px-4 pb-8 pt-3 max-w-xl mx-auto">
+      <div class="w-9 h-1 rounded-full mx-auto mb-3" style="background:var(--line-dash)" />
+
+      <!-- Success state -->
+      <div v-if="betSheet.done" class="sheet-done">
+        <svg width="36" height="36" viewBox="0 0 36 36" fill="none" stroke="#22c55e" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="18" cy="18" r="16"/><polyline points="11,18 16,23 25,13"/>
+        </svg>
+        <p>投注记录已保存</p>
       </div>
-    </Transition>
-  </Teleport>
+
+      <template v-else>
+        <SheetHeader class="mb-4">
+          <SheetTitle class="text-[15px] font-semibold text-left" style="color:var(--text)">
+            标记投注 · {{ { conservative:'稳健', balanced:'均衡', high_odds:'博高赔', scoreline:'比分' }[betSheet.planId] || betSheet.planId }}方案
+          </SheetTitle>
+        </SheetHeader>
+
+        <div class="flex flex-col gap-4">
+          <p class="text-sm" style="color:var(--text2)">记录您实际购买的注额，AI 将追踪命中情况</p>
+          <div>
+            <label class="sheet-label">投注金额（元）</label>
+            <div class="sheet-stake-row">
+              <button class="stake-adj" @click="betSheet.stake = Math.max(2, betSheet.stake - 2)">−</button>
+              <input
+                v-model.number="betSheet.stake"
+                class="stake-input"
+                type="number" min="2" max="10000" step="2"
+              />
+              <button class="stake-adj" @click="betSheet.stake = Math.min(10000, betSheet.stake + 2)">+</button>
+            </div>
+          </div>
+          <div v-if="betSheet.error" class="sheet-error">{{ betSheet.error }}</div>
+        </div>
+
+        <SheetFooter class="mt-6 flex-row gap-3">
+          <button class="sheet-cancel flex-1" @click="closeBetSheet">取消</button>
+          <button class="sheet-confirm flex-1" :disabled="betSheet.submitting" @click="confirmBet">
+            <span v-if="betSheet.submitting" class="btn-spin" />
+            {{ betSheet.submitting ? '保存中…' : '确认已购买' }}
+          </button>
+        </SheetFooter>
+      </template>
+    </SheetContent>
+  </Sheet>
 </template>
 
 <style scoped>
@@ -1261,43 +1261,6 @@ onUnmounted(() => {
 .bet-mark-btn:active { opacity: .8; }
 
 /* ── Bet sheet ──────────────────────────────────────────────── */
-.sheet-backdrop {
-  position: fixed; inset: 0; z-index: 300;
-  background: rgba(0,0,0,.5);
-  display: flex; align-items: flex-end; justify-content: center;
-}
-@media (min-width: 600px) {
-  .sheet-backdrop { align-items: center; }
-}
-.sheet-panel {
-  width: min(420px, 100%);
-  background: var(--card);
-  border-radius: 16px 16px 0 0;
-  overflow: hidden;
-  padding-bottom: env(safe-area-inset-bottom, 0);
-}
-@media (min-width: 600px) {
-  .sheet-panel { border-radius: 14px; }
-}
-
-.sheet-enter-active { transition: opacity .2s ease, transform .2s ease; }
-.sheet-leave-active { transition: opacity .15s ease, transform .15s ease; }
-.sheet-enter-from { opacity: 0; transform: translateY(20px); }
-.sheet-leave-to   { opacity: 0; transform: translateY(12px); }
-@media (min-width: 600px) {
-  .sheet-enter-from, .sheet-leave-to { transform: scale(.97); }
-}
-
-.sheet-header {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 16px 16px 12px;
-  border-bottom: var(--card-bd);
-}
-.sheet-title { font-size: 14px; font-weight: 700; }
-.sheet-close { background: transparent; color: var(--text3); cursor: pointer; padding: 4px; }
-
-.sheet-body { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
-.sheet-desc { font-size: 12px; color: var(--text3); margin: 0; }
 .sheet-label { font-size: 12px; color: var(--text2); font-weight: 600; }
 .sheet-stake-row { display: flex; align-items: center; gap: 10px; }
 .stake-adj {
@@ -1330,11 +1293,6 @@ onUnmounted(() => {
 .stake-input:focus { border-color: var(--primary); }
 .sheet-error { font-size: 12px; color: #ef4444; }
 
-.sheet-footer {
-  display: flex; gap: 10px;
-  padding: 12px 16px 16px;
-  border-top: var(--card-bd);
-}
 .sheet-cancel {
   flex: 1;
   padding: 12px;
