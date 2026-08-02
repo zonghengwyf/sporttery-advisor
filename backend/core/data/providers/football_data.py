@@ -175,6 +175,35 @@ class FootballDataProvider:
             return []
 
 
+# ── 历史数据批量获取（供模型训练） ─────────────────────────────────────────
+
+def fetch_seasons(n_seasons: int = 3) -> list[dict]:
+    """下载最近 N 个赛季多联赛历史数据，返回标准化字典列表。
+    每条记录：{date, home_team, away_team, home_goals, away_goals}
+    """
+    provider = FootballDataProvider()
+    all_matches: list[dict] = []
+    seasons = _season_codes(n_seasons)
+
+    for league_code in _LEAGUE_MAP.values():
+        for season in seasons:
+            rows = provider._fetch_season(league_code, season)
+            for row in rows:
+                hg = _safe_int(row.get("FTHG"))
+                ag = _safe_int(row.get("FTAG"))
+                if hg is None or ag is None:
+                    continue
+                all_matches.append({
+                    "date": _parse_date(row.get("Date", "")),
+                    "home_team": row.get("HomeTeam", ""),
+                    "away_team": row.get("AwayTeam", ""),
+                    "home_goals": hg,
+                    "away_goals": ag,
+                })
+    logger.info("fetch_seasons: %d 场历史比赛", len(all_matches))
+    return all_matches
+
+
 # ── 工具函数 ─────────────────────────────────────────────────────────────────
 
 def _parse_csv(text: str) -> list[dict]:

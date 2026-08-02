@@ -46,11 +46,23 @@ class LLMClient:
         messages: list[dict],
         system: str | None = None,
         max_tokens: int = 4096,
+        max_retries: int = 2,
         **kwargs: Any,
     ) -> str:
-        if self.sdk == "anthropic":
-            return await self._anthropic_chat(messages, system, max_tokens, **kwargs)
-        return await self._openai_chat(messages, system, max_tokens, **kwargs)
+        """带指数退避重试的 LLM 调用。最多重试 max_retries 次。"""
+        import asyncio
+        last_exc: Exception | None = None
+        for attempt in range(max_retries + 1):
+            try:
+                if self.sdk == "anthropic":
+                    return await self._anthropic_chat(messages, system, max_tokens, **kwargs)
+                return await self._openai_chat(messages, system, max_tokens, **kwargs)
+            except Exception as e:
+                last_exc = e
+                if attempt < max_retries:
+                    wait = 2 ** attempt
+                    await asyncio.sleep(wait)
+        raise last_exc  # type: ignore[misc]
 
     async def chat_stream(
         self,

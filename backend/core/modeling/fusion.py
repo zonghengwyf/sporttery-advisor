@@ -93,16 +93,28 @@ class PredictionFusion:
         self,
         base: FusedProbs,
         intel_adjustment: dict[str, float],
+        shrinkage: float = 0.5,
     ) -> FusedProbs:
         """
         Apply LLM intelligence adjustment.
         intel_adjustment: {"home": +0.05, "draw": -0.02, "away": -0.03}
+        shrinkage: 调整幅度缩放因子，防止 LLM 过度自信（默认 0.5）。
         Values are additive shifts in probability space, renormalised after.
         """
+        adj = {
+            k: intel_adjustment.get(k, 0) * shrinkage
+            for k in ("home", "draw", "away")
+        }
+        # 校验三项之和，偏差过大时自动缩放（理想情况 sum ≈ 0）
+        total_shift = sum(adj.values())
+        if abs(total_shift) > 0.05:
+            scale = 0.05 / abs(total_shift)
+            adj = {k: v * scale for k, v in adj.items()}
+
         adjusted = {
-            "home": base.home + intel_adjustment.get("home", 0),
-            "draw": base.draw + intel_adjustment.get("draw", 0),
-            "away": base.away + intel_adjustment.get("away", 0),
+            "home": base.home + adj["home"],
+            "draw": base.draw + adj["draw"],
+            "away": base.away + adj["away"],
         }
         # Clip to [0.01, 0.98] to avoid extremes
         clipped = {k: max(0.01, min(0.98, v)) for k, v in adjusted.items()}

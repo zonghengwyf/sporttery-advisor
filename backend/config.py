@@ -38,6 +38,7 @@ class Settings(BaseSettings):
 
     # ── 数据源 API Key（留空使用免费源降级） ─────────────────────────────────
     # 竞彩赛单直接使用官方 App 内部接口，无需 Key
+    sporttery_api_key: Optional[str] = None
     odds_api_key: Optional[str] = None
     api_football_key: Optional[str] = None
 

@@ -66,9 +66,11 @@ def _neg_log_likelihood(params: np.ndarray, teams: list[str], matches: list[Matc
             return 1e9
         ll += m.weight * (
             math.log(t)
-            + math.log(poisson.pmf(m.home_goals, lam))
-            + math.log(poisson.pmf(m.away_goals, mu))
+            + poisson.logpmf(m.home_goals, lam)
+            + poisson.logpmf(m.away_goals, mu)
         )
+    if not math.isfinite(ll):
+        return 1e9
     return -ll
 
 
@@ -109,6 +111,40 @@ def fit(matches: list[MatchRecord], l2_lambda: float = 0.01) -> DCParams:
     return params
 
 
+def predict_score_matrix(
+    params: DCParams,
+    home_team: str,
+    away_team: str,
+    max_goals: int = 8,
+) -> list[list[float]]:
+    """返回完整比分概率矩阵 matrix[i][j] = P(主队进i球, 客队进j球)。"""
+    ha = params.attack.get(home_team)
+    hd = params.defence.get(home_team)
+    aa = params.attack.get(away_team)
+    ad = params.defence.get(away_team)
+
+    if None in (ha, hd, aa, ad):
+        # 中性矩阵
+        n = max_goals + 1
+        return [[1.0 / (n * n)] * n for _ in range(n)]
+
+    lam = math.exp(ha + ad + params.home_advantage)
+    mu  = math.exp(aa + hd)
+
+    matrix = []
+    for i in range(max_goals + 1):
+        row = []
+        for j in range(max_goals + 1):
+            p = (
+                _tau(i, j, lam, mu, params.rho)
+                * poisson.pmf(i, lam)
+                * poisson.pmf(j, mu)
+            )
+            row.append(p)
+        matrix.append(row)
+    return matrix
+
+
 def predict_probs(
     params: DCParams,
     home_team: str,
@@ -119,25 +155,12 @@ def predict_probs(
     Return {home, draw, away} 1X2 probabilities from fitted parameters.
     Falls back to neutral 1/3 if teams unseen.
     """
-    ha = params.attack.get(home_team)
-    hd = params.defence.get(home_team)
-    aa = params.attack.get(away_team)
-    ad = params.defence.get(away_team)
-
-    if None in (ha, hd, aa, ad):
-        return {"home": 1 / 3, "draw": 1 / 3, "away": 1 / 3}
-
-    lam = math.exp(ha + ad + params.home_advantage)
-    mu  = math.exp(aa + hd)
+    matrix = predict_score_matrix(params, home_team, away_team, max_goals)
 
     p_home = p_draw = p_away = 0.0
     for i in range(max_goals + 1):
         for j in range(max_goals + 1):
-            p = (
-                _tau(i, j, lam, mu, params.rho)
-                * poisson.pmf(i, lam)
-                * poisson.pmf(j, mu)
-            )
+            p = matrix[i][j]
             if i > j:
                 p_home += p
             elif i == j:
@@ -153,6 +176,51 @@ def predict_probs(
         "draw": p_draw / total,
         "away": p_away / total,
     }
+
+
+def predict_ttg(
+    params: DCParams,
+    home_team: str,
+    away_team: str,
+    max_goals: int = 8,
+) -> dict[str, float]:
+    """从比分矩阵计算总进球（TTG）三档概率：0-1球 / 2-3球 / 4+球。"""
+    matrix = predict_score_matrix(params, home_team, away_team, max_goals)
+    p_01 = p_23 = p_4plus = 0.0
+    for i in range(max_goals + 1):
+        for j in range(max_goals + 1):
+            total = i + j
+            if total <= 1:
+                p_01 += matrix[i][j]
+            elif total <= 3:
+                p_23 += matrix[i][j]
+            else:
+                p_4plus += matrix[i][j]
+    s = p_01 + p_23 + p_4plus
+    if s == 0:
+        return {"ttg_01": 1 / 3, "ttg_23": 1 / 3, "ttg_4plus": 1 / 3}
+    return {
+        "ttg_01": float(p_01 / s),
+        "ttg_23": float(p_23 / s),
+        "ttg_4plus": float(p_4plus / s),
+    }
+
+
+def predict_top_scorelines(
+    params: DCParams,
+    home_team: str,
+    away_team: str,
+    top_n: int = 6,
+    max_goals: int = 5,
+) -> list[dict]:
+    """返回概率最高的 top_n 个比分，用于竞彩 CRS 市场。"""
+    matrix = predict_score_matrix(params, home_team, away_team, max_goals)
+    scores = []
+    for i in range(max_goals + 1):
+        for j in range(max_goals + 1):
+            scores.append({"score": f"{i}-{j}", "prob": matrix[i][j]})
+    scores.sort(key=lambda x: x["prob"], reverse=True)
+    return scores[:top_n]
 
 
 def predict_from_features(

@@ -197,6 +197,7 @@ class TicketGenerator:
             "risk_label": llm_result.get("risk_label", "guarded"),
             "confidence": llm_result.get("confidence", 50),
             "skip_conditions": llm_result.get("skip_conditions", ""),
+            "dissent_notes": llm_result.get("dissent_notes", ""),
             "raw_analysis": llm_result.get("raw_text", ""),
         }
 
@@ -269,6 +270,7 @@ class TicketGenerator:
         enriched_predictions: list[dict],
         budget: float = 100.0,
         multiplier: int = 1,
+        recent_roi: float | None = None,
     ) -> list[ParlayPlan]:
         """
         enriched_predictions: 每项包含
@@ -478,13 +480,13 @@ class TicketGenerator:
             plan = _build_plan(plan_id, name, legs, base_stake, multiplier, budget)
             plans.append(plan)
 
-        # Kelly 动态调整注额
+        # Kelly 动态调整注额（含回撤保护）
         if plans:
-            kelly_stakes = kelly_allocate(plans, budget)
+            kelly_stakes = kelly_allocate(plans, budget, recent_roi=recent_roi)
             for plan in plans:
                 stake = kelly_stakes.get(plan.plan_id, plan.base_stake * plan.num_combos * plan.multiplier)
                 plan.total_stake = round(stake, 1)
-                plan.theoretical_prize = round(stake / max(plan.num_combos, 1) * plan.total_odds, 1)
+                plan.theoretical_prize = round(stake * plan.total_odds, 1)
 
         # 比分方案：从各场次的 scoreline_legs 收集
         scoreline_plan = _build_scoreline_plan(enriched_predictions, budget)
@@ -810,8 +812,8 @@ def _build_plan(
         win_prob *= 0.97 ** (n - 1)
 
     total_stake = base_stake * num_combos * multiplier
-    # 理论奖金：单注最高赔率积 × 单注额
-    theoretical_prize = base_stake * multiplier * total_odds
+    # 理论奖金：总注额 × 总赔率（多选腿时每个组合单注独立计算）
+    theoretical_prize = base_stake * num_combos * multiplier * total_odds
 
     avg_prob = win_prob ** (1 / n) if n > 0 else 0
     all_no_votes = all(leg.model_votes_total == 0 for leg in legs)
@@ -855,9 +857,12 @@ def kelly_fraction(win_prob: float, total_odds: float, kelly_factor: float = 0.2
     return max(0.0, full_kelly * kelly_factor)
 
 
-def kelly_allocate(plans: list, budget: float) -> dict[str, float]:
+def kelly_allocate(plans: list, budget: float, recent_roi: float | None = None) -> dict[str, float]:
     min_stake = 2.0
     fractions: dict[str, float] = {}
+
+    # 回撤保护：近5次出票ROI < -30%时stake减半
+    stake_scale = 0.5 if (recent_roi is not None and recent_roi < -0.30) else 1.0
 
     for plan in plans:
         f = kelly_fraction(plan.win_probability, plan.total_odds)
@@ -867,7 +872,7 @@ def kelly_allocate(plans: list, budget: float) -> dict[str, float]:
 
     if total_fraction <= 0:
         per_plan = max(min_stake, budget / max(len(plans), 1))
-        return {p.plan_id: round(per_plan, 1) for p in plans}
+        return {p.plan_id: round(per_plan * stake_scale, 1) for p in plans}
 
     n = len(plans)
     if budget < min_stake * n:
@@ -881,7 +886,17 @@ def kelly_allocate(plans: list, budget: float) -> dict[str, float]:
     for plan in plans:
         f = fractions[plan.plan_id]
         extra = distributable * (f / total_fraction)
-        allocation[plan.plan_id] = round(min_stake + extra, 1)
+        stake = round((min_stake + extra) * stake_scale, 1)
+
+        # 回撤保护：单票理论奖金超过本金50%时自动降倍
+        if plan.total_odds > 0:
+            potential_prize = stake * plan.total_odds
+            max_prize = budget * 0.5
+            if potential_prize > max_prize:
+                stake = round(max_prize / plan.total_odds, 1)
+                stake = max(min_stake, stake)  # 不低于最小注额
+
+        allocation[plan.plan_id] = stake
 
     return allocation
 

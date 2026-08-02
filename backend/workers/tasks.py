@@ -3,6 +3,7 @@
 每日调度：08:00 同步赛单，09:00 运行分析流水线
 """
 import logging
+import math
 from datetime import date
 from typing import Optional
 
@@ -191,10 +192,47 @@ async def sync_match_results():
             logger.info("赛果同步 match_id=%d %s vs %s → %s (%s)",
                         match.id, match.home_team, match.away_team, actual, score or "—")
 
+            # 自动写入回测记录（解锁温度校准 + 真实指标）
+            await _auto_save_backtest(session, match)
+
             await _settle_bet_records(session, match, actual)
 
         await session.commit()
         logger.info("赛果同步完成：%d / %d 场", updated, len(pending_matches))
+
+
+async def _auto_save_backtest(session, match) -> None:
+    """赛果同步后自动将最新预测写入 DuckDB 回测表，驱动校准与指标闭环。"""
+    from sqlalchemy import select as sa_select
+    from db.models import Prediction
+
+    result = await session.execute(
+        sa_select(Prediction)
+        .where(Prediction.match_id == match.id)
+        .order_by(Prediction.created_at.desc())
+        .limit(1)
+    )
+    pred = result.scalar_one_or_none()
+    if not pred or not (pred.fused_probs or pred.stat_probs):
+        return
+
+    try:
+        from config import get_settings
+        from core.data.snapshot import SnapshotManager
+        snap = SnapshotManager(db_path=get_settings().duckdb_path)
+        try:
+            await snap.save_backtest_result(
+                match_id=match.id,
+                predicted=pred.fused_probs or pred.stat_probs,
+                actual=match.actual_result,
+                user_id=pred.user_id or 0,
+                market_odds=match.sporttery_odds,
+            )
+        finally:
+            snap.close()
+        logger.debug("回测自动写入 match_id=%d actual=%s", match.id, match.actual_result)
+    except Exception as exc:
+        logger.debug("回测自动写入失败 match_id=%d: %s", match.id, exc)
 
 
 async def _fetch_result(source_manager, match) -> tuple[str | None, str | None]:
@@ -393,7 +431,14 @@ async def run_auto_ticket(
             await session.refresh(skip_run)
             return skip_run.id
 
-        tickets_json = _build_auto_tickets(generator, all_match_data, budget=settings.auto_ticket_stake)
+        # Kelly 回撤保护：查询近 5 次出票 ROI
+        recent_roi = await _compute_recent_roi(session, _uid)
+        if recent_roi is not None and recent_roi < -0.30:
+            logger.warning("近 5 次出票 ROI=%.1f%%，触发回撤保护（stake 减半）", recent_roi * 100)
+
+        tickets_json = _build_auto_tickets(
+            generator, all_match_data, budget=settings.auto_ticket_stake, recent_roi=recent_roi
+        )
 
         # Pre-embed team names in leg dicts for historical display (avoids N+1 at read time)
         _match_map = {m.id: m for m in matches}
@@ -435,9 +480,82 @@ async def run_auto_ticket(
             await _db_ctx.__aexit__(None, None, None)
 
 
-def _build_auto_tickets(generator, all_match_data: list, budget: float) -> dict:
+def _compute_run_roi(run) -> float | None:
+    """根据已同步的赛果计算单次出票 ROI = (总派奖 - 总投入) / 总投入。
+    未能完全结算的方案跳过；无任何可结算方案时返回 None。"""
+    if not run.tickets_json or not run.results_json:
+        return None
+    from api.bets import _hhad_result_from_score
+
+    outcome_map = {"H": "主胜", "D": "平局", "A": "客胜"}
+    total_stake = 0.0
+    total_payout = 0.0
+
+    for scheme in run.tickets_json.get("schemes", []):
+        legs = scheme.get("legs", [])
+        if not legs:
+            continue
+        settled = True
+        all_won = True
+        for leg in legs:
+            res = run.results_json.get(str(leg.get("match_id")))
+            if not res or not res.get("actual"):
+                settled = False
+                break
+            if leg.get("market") == "让球胜平负" and leg.get("handicap") is not None:
+                hhad = _hhad_result_from_score(res.get("score"), leg["handicap"])
+                if hhad is None:
+                    settled = False
+                    break
+                actual_pick = outcome_map.get(hhad)
+            else:
+                actual_pick = outcome_map.get(res["actual"])
+            picks = leg.get("picks") or [leg.get("pick")]
+            if actual_pick not in picks:
+                all_won = False
+        if not settled:
+            continue
+        stake = float(scheme.get("total_stake") or 0)
+        if stake <= 0:
+            continue
+        total_stake += stake
+        if all_won:
+            total_payout += stake * float(scheme.get("total_odds") or 1.0)
+
+    if total_stake <= 0:
+        return None
+    return (total_payout - total_stake) / total_stake
+
+
+async def _compute_recent_roi(session, user_id, limit: int = 5) -> float | None:
+    """近 N 次已同步自动出票的平均 ROI，用于 Kelly 回撤保护。
+    按 user_id 过滤（None 表示系统级出票），避免跨用户混淆。"""
+    from sqlalchemy import select as sa_select
+
+    user_filter = (
+        AutoTicketRun.user_id.is_(None) if user_id is None
+        else AutoTicketRun.user_id == user_id
+    )
+    result = await session.execute(
+        sa_select(AutoTicketRun)
+        .where(
+            user_filter,
+            AutoTicketRun.sync_status.in_(["synced", "partial"]),
+            AutoTicketRun.results_json.isnot(None),
+        )
+        .order_by(AutoTicketRun.id.desc())
+        .limit(limit)
+    )
+    runs = result.scalars().all()
+    rois = [r for r in (_compute_run_roi(run) for run in runs) if r is not None]
+    if not rois:
+        return None
+    return sum(rois) / len(rois)
+
+
+def _build_auto_tickets(generator, all_match_data: list, budget: float, recent_roi: float | None = None) -> dict:
     """把多场 Prediction 数据合并为票型 JSON（复用 TicketGenerator）。"""
-    plans = generator.generate_parlay_plans(all_match_data, budget=budget)
+    plans = generator.generate_parlay_plans(all_match_data, budget=budget, recent_roi=recent_roi)
     return {
         "schemes": [p.to_dict() for p in plans],
         "match_count": len(all_match_data),
@@ -552,10 +670,15 @@ async def retrain_model(seasons: int = 3):
             except (KeyError, ValueError):
                 continue
 
+        if not records:
+            logger.warning("历史数据解析后为空，放弃训练")
+            return None
+
         records_with_weights = apply_time_decay(records, today)
         params = fit(records_with_weights)
         logger.info(
-            "模型训练完成：%d 队伍，log-likelihood=%.2f",
+            "模型训练完成：%d 场，%d 队伍，log-likelihood=%.2f",
+            len(records),
             len(params.attack),
             params.log_likelihood,
         )
@@ -563,6 +686,66 @@ async def retrain_model(seasons: int = 3):
         from core.pipeline import save_dc_params_to_disk
         saved_path = save_dc_params_to_disk(params)
         logger.info("DC 参数已保存至：%s", saved_path)
+
+        # 注册到模型注册表，用留出验证集计算真实指标后再决定是否晋升
+        try:
+            from core.modeling.model_registry import ModelRegistry, ModelMetrics
+            from core.modeling.dixon_coles import predict_probs
+            from config import get_settings
+
+            # 用最近 100 场比赛做留出验证，计算真实 Brier / log-loss
+            validation = records_with_weights[-100:] if len(records_with_weights) > 100 else records_with_weights
+            brier_sum = log_loss_sum = 0.0
+            n_val = 0
+            for m in validation:
+                probs = predict_probs(params, m.home_team, m.away_team)
+                actual = "H" if m.home_goals > m.away_goals else ("D" if m.home_goals == m.away_goals else "A")
+                outcome_map = {"H": 0, "D": 1, "A": 2}
+                oi = outcome_map.get(actual, 0)
+                p = [probs["home"], probs["draw"], probs["away"]]
+                # Brier: sum((p_i - o_i)^2)
+                brier_sum += sum((p[j] - (1.0 if j == oi else 0.0)) ** 2 for j in range(3))
+                # log-loss: -log(p_actual)
+                log_loss_sum += -math.log(max(p[oi], 1e-9))
+                n_val += 1
+
+            if n_val > 0:
+                metrics = ModelMetrics(
+                    brier=round(brier_sum / n_val, 4),
+                    log_loss=round(log_loss_sum / n_val, 4),
+                    rps=0.0, ece=0.0,
+                    n=n_val,
+                )
+            else:
+                metrics = ModelMetrics(n=0)
+
+            registry = ModelRegistry(get_settings().duckdb_path)
+            model_id = f"dc_{today.isoformat()}"
+            metadata = {
+                "params": {
+                    "attack": params.attack,
+                    "defence": params.defence,
+                    "home_advantage": params.home_advantage,
+                    "rho": params.rho,
+                },
+                "log_likelihood": params.log_likelihood,
+                "validation_n": n_val,
+            }
+            # 无验证数据时跳过晋升，避免零指标错误替换 champion
+            if n_val > 0:
+                promoted = await registry.try_auto_promote(
+                    model_id=model_id,
+                    competition="global",
+                    trained_until=today.isoformat(),
+                    metrics=metrics,
+                    metadata=metadata,
+                )
+                if promoted:
+                    logger.info("新模型已晋升为 champion: %s (Brier=%.4f)", model_id, metrics.brier)
+            else:
+                logger.warning("验证数据不足，跳过模型晋升")
+        except Exception as exc:
+            logger.warning("模型注册表写入失败（不影响训练结果）：%s", exc)
         return params
 
     except Exception as exc:

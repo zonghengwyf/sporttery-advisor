@@ -116,25 +116,7 @@ class SourceManager:
 
 # ── 工具函数 ───────────────────────────────────────────────────────────────────
 
-_LEAGUE_SPORT_MAP: dict[str, str] = {
-    "英超": "soccer_epl",
-    "西甲": "soccer_spain_la_liga",
-    "德甲": "soccer_germany_bundesliga",
-    "意甲": "soccer_italy_serie_a",
-    "法甲": "soccer_france_ligue_one",
-    "欧冠": "soccer_uefa_champs_league",
-    "欧罗巴": "soccer_uefa_europa_league",
-    "荷甲": "soccer_netherlands_eredivisie",
-    "葡超": "soccer_portugal_primeira_liga",
-    "苏超": "soccer_scotland_premiership",
-}
-
-
-def _resolve_sport_key(league: str) -> str | None:
-    for keyword, key in _LEAGUE_SPORT_MAP.items():
-        if keyword in league:
-            return key
-    return None
+from core.data.providers.odds_api import _LEAGUE_SPORT_MAP, _resolve_sport_key  # noqa: E402
 
 
 def _normalize_team(name: str) -> str:

@@ -125,8 +125,16 @@ class EnsembleAnalyzer:
                 is_confident=False,
             )
 
+        try:
+            accuracy_weights = await _load_accuracy_weights(session)
+        except Exception as exc:
+            logger.debug("加载模型准确率权重失败，退化为等权投票: %s", exc)
+            accuracy_weights = None
+
         final_outcome, consensus_ratio = _majority_vote(
-            valid_votes, strategy=config.strategy
+            valid_votes,
+            strategy=config.strategy,
+            accuracy_weights=accuracy_weights,
         )
         is_confident = consensus_ratio >= config.min_consensus
 
@@ -267,12 +275,28 @@ def _outcome_from_llm(llm_result: dict, fused_probs: dict) -> str:
 
 
 def _majority_vote(
-    votes: list[ModelVote], strategy: str = "majority"
+    votes: list[ModelVote],
+    strategy: str = "majority",
+    accuracy_weights: dict[str, float] | None = None,
 ) -> tuple[str, float]:
-    """返回 (最终方向, 共识比例)。"""
+    """返回 (最终方向, 共识比例)。
+    accuracy_weights: {model_key: 0-1} 历史准确率，用于按实力加权。
+    """
     counts: dict[str, float] = {"H": 0.0, "D": 0.0, "A": 0.0}
 
-    if strategy == "weighted":
+    if accuracy_weights:
+        # 按历史准确率加权（准确率 < 33% 随机水平降为 0.1；无历史数据的模型按中性 0.5）
+        total_weight = 0.0
+        for v in votes:
+            key = f"{v.provider}/{v.model_name}"
+            w = accuracy_weights.get(key, 0.5)
+            if w < 0.33:
+                w = 0.1
+            counts[v.outcome] = counts.get(v.outcome, 0) + w
+            total_weight += w
+        winner = max(counts, key=counts.__getitem__)
+        ratio = counts[winner] / max(total_weight, 1e-9)
+    elif strategy == "weighted":
         # 按置信度加权
         total_weight = sum(v.confidence for v in votes) or 1.0
         for v in votes:
@@ -290,6 +314,53 @@ def _majority_vote(
     return winner, round(ratio, 3)
 
 
+async def _load_accuracy_weights(session) -> dict[str, float]:
+    """从数据库加载各模型历史准确率，用于加权投票。
+    无样本的模型不会出现于返回值，调用方按中性 0.5 处理。"""
+    from datetime import date, timedelta
+    from sqlalchemy import select
+    from db.models import Match, Prediction
+
+    cutoff = date.today() - timedelta(days=30)
+    result = await session.execute(
+        select(Prediction, Match)
+        .join(Match, Prediction.match_id == Match.id)
+        .where(Match.sale_date >= str(cutoff), Match.actual_result.isnot(None))
+    )
+    rows = result.all()
+
+    stats: dict[str, dict] = {}
+    for pred, match in rows:
+        votes_data = (pred.tickets or {}).get("ensemble_votes", [])
+        if votes_data:
+            for v in votes_data:
+                key = f"{v.get('provider', '')}/{v.get('model', '')}"
+                if not key or key == "/":
+                    continue
+                if key not in stats:
+                    stats[key] = {"correct": 0, "total": 0}
+                if v.get("outcome") and not v.get("error"):
+                    stats[key]["total"] += 1
+                    if v["outcome"] == match.actual_result:
+                        stats[key]["correct"] += 1
+        else:
+            key = f"{pred.llm_provider}/{pred.llm_model}"
+            if key not in stats:
+                stats[key] = {"correct": 0, "total": 0}
+            fp = pred.fused_probs or pred.stat_probs or {}
+            probs = [fp.get("home", 0), fp.get("draw", 0), fp.get("away", 0)]
+            predicted = ["H", "D", "A"][probs.index(max(probs))] if any(probs) else None
+            if predicted:
+                stats[key]["total"] += 1
+                if predicted == match.actual_result:
+                    stats[key]["correct"] += 1
+
+    return {
+        k: v["correct"] / v["total"] if v["total"] > 0 else 0.5
+        for k, v in stats.items()
+    }
+
+
 def _aggregate_llm_results(votes: list[ModelVote], final_outcome: str) -> dict:
     """汇总多个模型的 LLM 分析，取共识方向的智能摘要。"""
     # 优先取与最终方向一致的、置信度最高的模型的详细结果
@@ -301,6 +372,27 @@ def _aggregate_llm_results(votes: list[ModelVote], final_outcome: str) -> dict:
     summaries = [v.intel_summary for v in votes if v.intel_summary]
     if summaries:
         result["intel_summary"] = " | ".join(dict.fromkeys(summaries))  # 去重保序
+
+    # 少数派意见：共识不足或存在 avoid 票时保留 dissent 摘要
+    dissent_votes = [v for v in votes if v.outcome != final_outcome and not v.error]
+    avoid_votes = [v for v in votes if v.risk_label == "avoid"]
+    if dissent_votes or avoid_votes:
+        dissent_parts = []
+        for v in dissent_votes[:2]:  # 最多保留 2 条 dissent
+            if v.intel_summary:
+                dissent_parts.append(f"[{v.model_name}→{v.outcome}] {v.intel_summary}")
+        for v in avoid_votes[:1]:  # avoid 单独标注
+            if v.intel_summary and f"[{v.model_name}→" not in str(dissent_parts):
+                dissent_parts.append(f"[{v.model_name}建议回避] {v.intel_summary}")
+        if dissent_parts:
+            result["dissent_notes"] = " ; ".join(dissent_parts)
+            # 低共识时把 dissent 追加到 intel_summary
+            if len(aligned) < len(votes) * 0.75:
+                existing = result.get("intel_summary", "")
+                result["intel_summary"] = (
+                    f"{existing} | ⚠️ 分歧：{' ; '.join(dissent_parts)}"
+                    if existing else f"⚠️ 分歧：{' ; '.join(dissent_parts)}"
+                )
 
     # 平均置信度
     avg_conf = sum(v.confidence for v in votes) / len(votes)

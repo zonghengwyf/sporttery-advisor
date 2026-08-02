@@ -122,6 +122,7 @@ class DailyPipeline:
         self._dc_params = None      # lazy-load from disk
         self._devig_method = None   # cached, re-evaluated each daily run
         self._snap = None           # SnapshotManager, lazy-init in async context
+        self._calibrator = None     # TemperatureCalibrator, lazy-init in async context
 
     # ── 公开接口 ─────────────────────────────────────────────────────────────
 
@@ -248,6 +249,7 @@ class DailyPipeline:
     async def _layer1_stats(self, match) -> tuple[dict, dict]:
         """Dixon-Coles + Elo + 海外赔率去水差 → 融合概率。"""
         sources: dict[str, dict] = {}
+        cal = await self._get_calibrator()
 
         # Elo 评分
         try:
@@ -256,22 +258,34 @@ class DailyPipeline:
             elos = await elo_prv.get_match_elos(match.home_team, match.away_team)
             if elos and elos.get("home_elo") and elos.get("away_elo"):
                 from core.modeling.dixon_coles import predict_from_features
-                sources["elo"] = predict_from_features(
+                elo_probs = predict_from_features(
                     home_elo=elos["home_elo"],
                     away_elo=elos["away_elo"],
                 )
+                sources["elo"] = cal.transform(elo_probs) if cal else elo_probs
         except Exception as e:
             logger.debug("Elo 获取失败：%s", e)
 
         # Dixon-Coles（需要预先训练好的参数文件）
-        dc_params = self._load_dc_params()
+        dc_params = await self._load_dc_params()
         if dc_params:
             try:
                 from core.modeling.dixon_coles import predict_probs
-                dc = predict_probs(dc_params, match.home_team, match.away_team)
-                # 中性 1/3 降级结果不放入融合源
-                if not (abs(dc["home"] - 1 / 3) < 0.001):
-                    sources["dc"] = dc
+                # 中文竞彩名 → 英文标准名（与训练数据对齐）
+                home_en = self._resolve_team_en(match.home_team, dc_params)
+                away_en = self._resolve_team_en(match.away_team, dc_params)
+                if home_en and away_en:
+                    dc = predict_probs(dc_params, home_en, away_en)
+                    # 中性 1/3 降级结果不放入融合源
+                    if not (abs(dc["home"] - 1 / 3) < 0.001):
+                        sources["dc"] = cal.transform(dc) if cal else dc
+                    # TTG 总进球概率（从 DC 比分矩阵直接映射）
+                    try:
+                        from core.modeling.dixon_coles import predict_ttg
+                        ttg = predict_ttg(dc_params, home_en, away_en)
+                        sources["dc_ttg"] = ttg
+                    except Exception as e:
+                        logger.debug("TTG 计算失败：%s", e)
             except Exception as e:
                 logger.debug("Dixon-Coles 预测失败：%s", e)
 
@@ -296,9 +310,15 @@ class DailyPipeline:
         if not sources:
             sources["elo"] = {"home": 0.38, "draw": 0.28, "away": 0.34}
 
+        # 提取 TTG（不参与 1X2 融合，直接透传）
+        ttg = sources.pop("dc_ttg", None)
+
         primary = sources.get("dc") or sources.get("market") or list(sources.values())[0]
         fused = self.fusion.fuse(sources)
-        return primary, fused.to_dict()
+        fused_dict = fused.to_dict()
+        if ttg:
+            fused_dict.update(ttg)
+        return primary, fused_dict
 
     # ── Layer 2 ─────────────────────────────────────────────────────────────
 
@@ -318,12 +338,15 @@ class DailyPipeline:
             match.sporttery_odds_open, match.sporttery_odds
         )
 
+        # 动态检测异常状态：近期有爆冷、大比分失利或状态断档
+        has_abnormal_form = _detect_abnormal_form(intel)
+
         context = MatchContext(
             home_team=match.home_team,
             away_team=match.away_team,
             league=match.league,
             is_tournament=is_tournament,
-            has_abnormal_form=False,
+            has_abnormal_form=has_abnormal_form,
             stat_probs=fused_probs,
             odds_data={
                 "sporttery": match.sporttery_odds or {},
@@ -511,6 +534,15 @@ class DailyPipeline:
                 )
         lines.append(f"- 统计融合概率：主胜 {h:.1%} / 平 {d:.1%} / 客胜 {a:.1%}")
 
+        # TTG 总进球概率（来自 DC 比分矩阵）
+        ttg_01 = fused_probs.get("ttg_01")
+        ttg_23 = fused_probs.get("ttg_23")
+        ttg_4p = fused_probs.get("ttg_4plus")
+        if ttg_01 is not None:
+            lines.append(
+                f"- 总进球概率：0-1球 {ttg_01:.1%} / 2-3球 {ttg_23:.1%} / 4+球 {ttg_4p:.1%}"
+            )
+
         # Elo 评分
         elo = intel.get("elo")
         if elo:
@@ -627,9 +659,79 @@ class DailyPipeline:
 
     # ── 辅助 ─────────────────────────────────────────────────────────────────
 
-    def _load_dc_params(self):
+    async def _get_calibrator(self):
+        """基于最近回测数据拟合温度校准器，数据不足时返回 None。"""
+        if self._calibrator is not None:
+            return self._calibrator
+        try:
+            from core.modeling.calibration import TemperatureCalibrator
+            import asyncio
+            import duckdb
+            db_path = self.settings.duckdb_path
+            def _query():
+                con = duckdb.connect(db_path, read_only=True)
+                try:
+                    return con.execute(
+                        "SELECT p_home, p_draw, p_away, actual FROM backtest_results ORDER BY recorded_at DESC LIMIT 200"
+                    ).fetchall()
+                finally:
+                    con.close()
+            rows = await asyncio.to_thread(_query)
+            if len(rows) < 20:
+                logger.debug("回测数据不足（%d 条），跳过温度校准", len(rows))
+                self._calibrator = None
+                return None
+            raw_probs = [[r[0], r[1], r[2]] for r in rows]
+            outcome_map = {"H": 0, "D": 1, "A": 2}
+            outcomes = [outcome_map.get(r[3], 0) for r in rows]
+            cal = TemperatureCalibrator()
+            result = cal.fit(raw_probs, outcomes)
+            logger.info(
+                "温度校准完成 T=%.2f Brier %.4f→%.4f n=%d",
+                result.temperature, result.brier_before, result.brier_after, result.n_samples,
+            )
+            self._calibrator = cal
+            return cal
+        except Exception as e:
+            logger.debug("温度校准拟合失败：%s", e)
+            self._calibrator = None
+            return None
+
+    @staticmethod
+    def _resolve_team_en(cn_name: str, dc_params) -> str | None:
+        """将中文竞彩名映射为 DC 训练时使用的英文名，失败返回 None。"""
+        from core.data.team_names import fuzzy_match_english, resolve_to_english
+        exact = resolve_to_english(cn_name)
+        if exact and exact in dc_params.attack:
+            return exact
+        candidates = list(dc_params.attack.keys())
+        return fuzzy_match_english(cn_name, candidates)
+
+    async def _load_dc_params(self):
+        """优先从 ModelRegistry champion 加载 DC 参数，fallback 到本地 dc_params.json。"""
         if self._dc_params is not None:
             return self._dc_params
+
+        # 1. 尝试从模型注册表加载 champion
+        try:
+            from core.modeling.model_registry import ModelRegistry
+            registry = ModelRegistry(self.settings.duckdb_path)
+            champion = await registry.get_champion("global")
+            if champion and champion.metadata.get("params"):
+                from core.modeling.dixon_coles import DCParams
+                p = champion.metadata["params"]
+                self._dc_params = DCParams(
+                    attack=p["attack"],
+                    defence=p["defence"],
+                    home_advantage=p["home_advantage"],
+                    rho=p["rho"],
+                )
+                logger.info("从模型注册表加载 champion DC 参数（%s）", champion.model_id)
+                return self._dc_params
+        except Exception as e:
+            logger.debug("模型注册表加载失败，fallback 本地文件：%s", e)
+
+        # 2. Fallback 本地文件
         params_path = Path(self.settings.duckdb_path).parent / "dc_params.json"
         if not params_path.exists():
             return None
@@ -680,20 +782,60 @@ class DailyPipeline:
 
 # ── 模块级辅助函数 ─────────────────────────────────────────────────────────
 
+def _detect_abnormal_form(intel: dict) -> bool:
+    """基于近期战绩检测是否存在异常状态，用于触发 form-context skill。"""
+    def _has_shock(form: list[dict] | None) -> bool:
+        if not form or len(form) < 3:
+            return False
+        for m in form:
+            gf = m.get("gf")
+            ga = m.get("ga")
+            if gf is None or ga is None:
+                continue
+            margin = gf - ga
+            result = m.get("result")
+            # 大比分失利（输2球以上）
+            if result == "L" and margin <= -2:
+                return True
+        # 连胜断档：前一场大胜（≥3球）后一场即输
+        for i in range(len(form) - 1):
+            cur, nxt = form[i], form[i + 1]
+            if (cur.get("result") == "W" and (cur.get("gf") or 0) - (cur.get("ga") or 0) >= 3
+                    and nxt.get("result") == "L"):
+                return True
+        return False
+
+    return _has_shock(intel.get("form_home")) or _has_shock(intel.get("form_away"))
+
+
 def _parse_llm_response(text: str) -> dict:
-    """从 LLM 输出中提取 ```json 代码块，失败时返回最小默认值。"""
-    match = re.search(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if match:
+    """从 LLM 输出中提取 ```json 代码块，失败时返回最小默认值。
+    使用 json.JSONDecoder().raw_decode 支持嵌套 JSON 结构。
+    """
+    decoder = json.JSONDecoder()
+
+    # 1. 优先匹配 ```json ... ``` 代码块
+    for match in re.finditer(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL):
         try:
             return json.loads(match.group(1))
         except json.JSONDecodeError:
             pass
 
-    # 降级：寻找含 risk_label 的 JSON 对象
-    match2 = re.search(r'\{[^{}]*"risk_label"[^{}]*\}', text, re.DOTALL)
-    if match2:
+    # 2. 从文本尾部反向找 { 开始解析，支持嵌套
+    for i in range(len(text) - 1, -1, -1):
+        if text[i] == "{":
+            try:
+                obj, _ = decoder.raw_decode(text[i:])
+                if isinstance(obj, dict) and "risk_label" in obj:
+                    return obj
+            except json.JSONDecodeError:
+                continue
+
+    # 3. 降级：寻找含 risk_label 的任意 JSON 对象
+    match = re.search(r'\{[^{}]*"risk_label"[^{}]*\}', text, re.DOTALL)
+    if match:
         try:
-            return json.loads(match2.group(0))
+            return json.loads(match.group(0))
         except json.JSONDecodeError:
             pass
 
