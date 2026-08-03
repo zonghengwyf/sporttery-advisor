@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { toast } from 'vue-sonner'
 import { useRouter, useRoute } from 'vue-router'
 import api, { betsApi } from '@/api'
 import { useBettingStore } from '@/stores/betting'
@@ -56,6 +57,7 @@ interface Schemes {
   balanced?: Scheme
   high_odds?: Scheme
   scoreline?: Scheme
+  [key: string]: Scheme | undefined  // 容错方案：conservative_cover 等动态键
 }
 
 // ── State ────────────────────────────────────────────────────
@@ -70,7 +72,7 @@ const pendingMatchIds = ref<number[]>([])
 const currentMatchName = ref('')
 
 const schemes = ref<Schemes | null>(null)
-const activeTab = ref<'conservative' | 'balanced' | 'high_odds' | 'scoreline'>('conservative')
+const activeTab = ref<string>('conservative')
 const error = ref<string | null>(null)
 const progressIndex = ref(0)
 const progressMsg = ref('')
@@ -84,12 +86,27 @@ let _elapsedTimer: ReturnType<typeof setInterval> | null = null
 let _pollTimer: ReturnType<typeof setInterval> | null = null
 let _lastEventIndex = 0
 
-const TABS = [
-  { key: 'conservative' as const, label: '稳健', risk: '低风险' },
-  { key: 'balanced'     as const, label: '均衡', risk: '中风险' },
-  { key: 'high_odds'    as const, label: '博高赔', risk: '高风险' },
-  { key: 'scoreline'    as const, label: '比分', risk: '极高' },
+const BASE_TABS = [
+  { key: 'conservative', label: '稳健', risk: '低风险' },
+  { key: 'balanced',     label: '均衡', risk: '中风险' },
+  { key: 'high_odds',    label: '博高赔', risk: '高风险' },
+  { key: 'scoreline',    label: '比分', risk: '极高' },
 ]
+
+// 动态标签页：后端返回的 M串N 容错方案（*_cover）插在对应基础方案后
+const TABS = computed(() => {
+  const tabs = [...BASE_TABS]
+  if (schemes.value) {
+    for (const b of BASE_TABS) {
+      const ck = `${b.key}_cover`
+      if (schemes.value[ck]?.legs?.length) {
+        const at = tabs.findIndex(t => t.key === b.key) + 1
+        tabs.splice(at, 0, { key: ck, label: `${b.label}·容错`, risk: b.risk })
+      }
+    }
+  }
+  return tabs
+})
 
 const STEPS = [
   { key: 'check',  label: '检查已有分析' },
@@ -100,11 +117,11 @@ const STEPS = [
 
 // ── Derived ──────────────────────────────────────────────────
 const activeScheme  = computed(() => schemes.value?.[activeTab.value] ?? null)
-const activeTabInfo = computed(() => TABS.find(t => t.key === activeTab.value) ?? TABS[0])
-const hasSchemes    = computed(() => schemes.value && TABS.some(t => schemes.value![t.key]?.legs?.length))
+const activeTabInfo = computed(() => TABS.value.find(t => t.key === activeTab.value) ?? TABS.value[0])
+const hasSchemes    = computed(() => schemes.value && TABS.value.some(t => schemes.value![t.key]?.legs?.length))
 const hasEstimatedOdds = computed(() => {
   if (!schemes.value) return false
-  for (const t of TABS) {
+  for (const t of TABS.value) {
     const legs = schemes.value[t.key]?.legs ?? []
     if (legs.some((l: Leg) => l.odds_estimated)) return true
   }
@@ -195,7 +212,7 @@ async function _poll(taskId: string) {
         // result is in data.result (written to Redis separately)
         if (data.result) {
           schemes.value = data.result
-          for (const t of TABS) {
+          for (const t of TABS.value) {
             if (data.result?.[t.key]?.legs?.length) { activeTab.value = t.key; break }
           }
           completedSteps.value = STEPS.length
@@ -217,7 +234,7 @@ async function _poll(taskId: string) {
     // Safety: done event was consumed in a previous tick but result arrived late
     if (!schemes.value && data.result) {
       schemes.value = data.result
-      for (const t of TABS) {
+      for (const t of TABS.value) {
         if (data.result?.[t.key]?.legs?.length) { activeTab.value = t.key; break }
       }
       completedSteps.value = STEPS.length
@@ -341,6 +358,10 @@ const betSheet = ref<BetSheet>({ visible: false, planId: '', stake: 20, submitti
 let betSheetTimer: ReturnType<typeof setTimeout> | null = null
 
 function openBetSheet(planId: string) {
+  if (planId.endsWith('_cover')) {
+    toast.info('容错（M串N）方案需按子组合拆分出票，暂不支持一键保存，请参照注数线下出票')
+    return
+  }
   if (betSheetTimer) { clearTimeout(betSheetTimer); betSheetTimer = null }
   const scheme = schemes.value?.[planId as keyof typeof schemes.value] as { stake?: number } | undefined
   betSheet.value = {

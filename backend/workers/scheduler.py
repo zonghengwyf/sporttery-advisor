@@ -23,8 +23,35 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+async def _auto_ticket_crons() -> tuple[str, str]:
+    """启动时从 DataSourceConfig 读取启用用户的出票/同步 cron（UI 设置页可配），
+    无配置或读取失败时回退 env 默认值。运行中修改 cron 仍需重启 worker 生效。"""
+    try:
+        from sqlalchemy import select as _sel
+        from db.models import DataSourceConfig
+        from db.session import AsyncSessionLocal
+
+        async with AsyncSessionLocal() as s:
+            r = await s.execute(
+                _sel(DataSourceConfig).where(
+                    DataSourceConfig.source_name == "auto_ticket",
+                    DataSourceConfig.enabled == True,  # noqa: E712
+                ).limit(1)
+            )
+            cfg = r.scalars().first()
+            if cfg and cfg.extra_config:
+                return (
+                    cfg.extra_config.get("cron") or settings.auto_ticket_cron,
+                    cfg.extra_config.get("sync_cron") or settings.auto_ticket_sync_cron,
+                )
+    except Exception as exc:
+        logger.warning("读取自动出票 cron 配置失败，使用 env 默认：%s", exc)
+    return settings.auto_ticket_cron, settings.auto_ticket_sync_cron
+
+
 async def main():
     scheduler = AsyncIOScheduler(timezone="Asia/Shanghai")
+    auto_cron, auto_sync_cron = await _auto_ticket_crons()
 
     scheduler.add_job(
         run_daily_analysis,
@@ -51,27 +78,28 @@ async def main():
         misfire_grace_time=1800,
     )
 
-    if settings.auto_ticket_enabled:
-        scheduler.add_job(
-            run_auto_ticket,
-            CronTrigger.from_crontab(settings.auto_ticket_cron),
-            id="auto_ticket",
-            name="自动出票",
-            replace_existing=True,
-            misfire_grace_time=3600,
-        )
-        scheduler.add_job(
-            sync_auto_ticket_results,
-            CronTrigger.from_crontab(settings.auto_ticket_sync_cron),
-            id="auto_ticket_sync",
-            name="自动出票赛果同步",
-            replace_existing=True,
-            misfire_grace_time=3600,
-        )
-        logger.info(
-            "自动出票已启用 | 出票：%s | 同步：%s",
-            settings.auto_ticket_cron, settings.auto_ticket_sync_cron,
-        )
+    # 自动出票始终注册：是否启用/预算按用户在 DataSourceConfig（UI 设置页）中的
+    # 配置逐用户判定，不再依赖 env 开关；cron 优先取 DB 配置（启动时读取）
+    scheduler.add_job(
+        run_auto_ticket,
+        CronTrigger.from_crontab(auto_cron),
+        id="auto_ticket",
+        name="自动出票",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    scheduler.add_job(
+        sync_auto_ticket_results,
+        CronTrigger.from_crontab(auto_sync_cron),
+        id="auto_ticket_sync",
+        name="自动出票赛果同步",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    logger.info(
+        "自动出票任务已注册（按用户配置启用） | 出票：%s | 同步：%s",
+        auto_cron, auto_sync_cron,
+    )
 
     scheduler.start()
     logger.info("调度器启动 | 分析流水线：%s", settings.daily_analyze_cron)

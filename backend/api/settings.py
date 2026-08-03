@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select, delete
@@ -48,6 +50,12 @@ class LLMConfigOut(BaseModel):
     model: str
     base_url: str | None
     is_default: bool
+    status: str = "unknown"           # ok / error / unknown
+    last_error: str | None = None
+    last_used_at: datetime | None = None
+    total_calls: int = 0
+    total_prompt_tokens: int = 0
+    total_completion_tokens: int = 0
 
     model_config = {"from_attributes": True}
 
@@ -183,7 +191,22 @@ async def test_llm_config(
         api_key=cfg.api_key,
         base_url=cfg.base_url,
     ))
-    return await client.test_connection()
+    result = await client.test_connection()
+    # 回写状态与用量，供设置页展示
+    cfg.status = "ok" if result.get("ok") else "error"
+    cfg.last_error = None if result.get("ok") else str(result.get("error"))[:500]
+    cfg.last_used_at = datetime.utcnow()
+    if result.get("ok"):
+        cfg.total_calls = (cfg.total_calls or 0) + 1
+        if client.last_usage:
+            cfg.total_prompt_tokens = (cfg.total_prompt_tokens or 0) + int(
+                client.last_usage.get("prompt_tokens") or 0
+            )
+            cfg.total_completion_tokens = (cfg.total_completion_tokens or 0) + int(
+                client.last_usage.get("completion_tokens") or 0
+            )
+    await db.commit()
+    return result
 
 
 @router.delete("/llm/{config_id}")
@@ -458,6 +481,7 @@ class AutoTicketConfigIn(BaseModel):
     enabled: bool = False
     cron: str = Field(default="30 9 * * *", pattern=_CRON_RE)
     sync_cron: str = Field(default="0 2 * * *", pattern=_CRON_RE)
+    stake: float = Field(default=100.0, gt=0)  # 每日出票预算（元）
 
 
 @router.get("/auto-ticket")

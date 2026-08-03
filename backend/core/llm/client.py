@@ -40,6 +40,10 @@ class LLMClient:
         defaults = PROVIDER_DEFAULTS.get(config.provider, PROVIDER_DEFAULTS["custom"])
         self.sdk = defaults["sdk"]
         self.base_url = config.base_url or defaults["base_url"]
+        # 最近一次 chat() 的 token 用量（{"prompt_tokens":…, "completion_tokens":…}），无则 None
+        self.last_usage: dict | None = None
+        # 对应 db LLMConfig 主键（由 pipeline 注入），用于用量/状态回写
+        self.db_config_id: int | None = None
 
     async def chat(
         self,
@@ -51,12 +55,16 @@ class LLMClient:
     ) -> str:
         """带指数退避重试的 LLM 调用。最多重试 max_retries 次。"""
         import asyncio
+        self.last_usage = None  # 重置，避免失败后误用上一次调用的用量
         last_exc: Exception | None = None
         for attempt in range(max_retries + 1):
             try:
                 if self.sdk == "anthropic":
-                    return await self._anthropic_chat(messages, system, max_tokens, **kwargs)
-                return await self._openai_chat(messages, system, max_tokens, **kwargs)
+                    text, usage = await self._anthropic_chat(messages, system, max_tokens, **kwargs)
+                else:
+                    text, usage = await self._openai_chat(messages, system, max_tokens, **kwargs)
+                self.last_usage = usage
+                return text
             except Exception as e:
                 last_exc = e
                 if attempt < max_retries:
@@ -82,7 +90,7 @@ class LLMClient:
 
     async def _anthropic_chat(
         self, messages: list[dict], system: str | None, max_tokens: int, **kwargs: Any
-    ) -> str:
+    ) -> tuple[str, dict | None]:
         client = anthropic.AsyncAnthropic(api_key=self.config.api_key)
         params: dict[str, Any] = {
             "model": self.config.model,
@@ -93,7 +101,13 @@ class LLMClient:
         if system:
             params["system"] = system
         response = await client.messages.create(**params)
-        return response.content[0].text
+        usage = None
+        if getattr(response, "usage", None):
+            usage = {
+                "prompt_tokens": getattr(response.usage, "input_tokens", 0) or 0,
+                "completion_tokens": getattr(response.usage, "output_tokens", 0) or 0,
+            }
+        return response.content[0].text, usage
 
     async def _anthropic_stream(
         self, messages: list[dict], system: str | None, max_tokens: int, **kwargs: Any
@@ -115,7 +129,7 @@ class LLMClient:
 
     async def _openai_chat(
         self, messages: list[dict], system: str | None, max_tokens: int, **kwargs: Any
-    ) -> str:
+    ) -> tuple[str, dict | None]:
         client = AsyncOpenAI(api_key=self.config.api_key, base_url=self.base_url)
         full_messages = []
         if system:
@@ -127,7 +141,13 @@ class LLMClient:
             max_tokens=max_tokens,
             **kwargs,
         )
-        return response.choices[0].message.content or ""
+        usage = None
+        if getattr(response, "usage", None):
+            usage = {
+                "prompt_tokens": getattr(response.usage, "prompt_tokens", 0) or 0,
+                "completion_tokens": getattr(response.usage, "completion_tokens", 0) or 0,
+            }
+        return (response.choices[0].message.content or ""), usage
 
     async def _openai_stream(
         self, messages: list[dict], system: str | None, max_tokens: int, **kwargs: Any

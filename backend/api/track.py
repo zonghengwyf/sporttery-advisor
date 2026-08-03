@@ -63,12 +63,34 @@ def _serialize_run(run: AutoTicketRun) -> dict:
         status = "pending"
         profit = None
         if all_settled:
-            status = "won" if all_won else "lost"
-            total_odds = 1.0
-            for leg in legs:
-                if not leg.get("void"):
-                    total_odds *= leg.get("odds", 1.0)
-            profit = round(run.stake * total_odds - run.stake, 2) if all_won else -run.stake
+            # 方案级注额（Kelly 分配后 ≠ run.stake），优先取方案自身 total_stake
+            stake_s = float(scheme.get("total_stake") or scheme.get("stake") or run.stake)
+            combo_sizes = scheme.get("combo_sizes")
+            if combo_sizes:
+                # M串N 容错方案：按中奖子组合枚举派奖，错腿不等于全输
+                from itertools import combinations
+                num_combos = max(int(scheme.get("num_combos") or 1), 1)
+                per_bet = stake_s / num_combos
+                payout = 0.0
+                for k in combo_sizes:
+                    for idxs in combinations(range(len(legs)), k):
+                        if not all(settled_legs[i].get("won") for i in idxs):
+                            continue
+                        odds_prod = 1.0
+                        for i in idxs:
+                            odds_prod *= float(legs[i].get("odds") or 0)
+                        payout += per_bet * odds_prod
+                status = "won" if payout > 0 else "lost"
+                profit = round(payout - stake_s, 2)
+            else:
+                status = "won" if all_won else "lost"
+                total_odds = float(scheme.get("total_odds") or 0)
+                if total_odds <= 0:
+                    total_odds = 1.0
+                    for leg in legs:
+                        if not leg.get("void"):
+                            total_odds *= leg.get("odds", 1.0)
+                profit = round(stake_s * total_odds - stake_s, 2) if all_won else -stake_s
 
         enriched_schemes.append({**scheme, "legs": settled_legs, "status": status, "profit": profit})
 

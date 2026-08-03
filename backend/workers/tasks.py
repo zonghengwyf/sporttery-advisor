@@ -147,7 +147,7 @@ async def run_daily_briefing():
 async def sync_match_results():
     """
     扫描已结束但 actual_result 为空的比赛，尝试同步赛果。
-    降级链：竞彩 API → The Odds API /scores → 跳过（等人工录入）。
+    降级链：竞彩赛果接口（批量）→ 竞彩在售接口 → The Odds API /scores → 跳过（等人工录入）。
     同步成功后更新关联 BetRecord 的结算状态。
     """
     from datetime import datetime, timedelta
@@ -155,10 +155,11 @@ async def sync_match_results():
     from db.models import BetRecord, Match
     from db.session import AsyncSessionLocal
 
-    now = datetime.utcnow()
+    # kickoff_at 存北京时间（naive），比较必须用同一时间基准（utcnow+8h）
+    now = datetime.utcnow() + timedelta(hours=8)
     cutoff = now - timedelta(hours=2, minutes=30)
 
-    logger.info("开始同步赛果，截止时间：%s", cutoff.isoformat())
+    logger.info("开始同步赛果，截止时间：%s（北京）", cutoff.isoformat())
 
     async with AsyncSessionLocal() as session:
         stmt = sa_select(Match).where(
@@ -179,8 +180,17 @@ async def sync_match_results():
         source_manager = await _get_source_manager()
         updated = 0
 
+        # 批量赛果：按待同步比赛的日期范围一次拉取（避免逐场全量查询）
+        dates = [m.kickoff_at.date() for m in pending_matches if m.kickoff_at]
+        results_map = await source_manager.get_results_map(min(dates), max(dates)) if dates else {}
+        if results_map:
+            logger.info("竞彩批量赛果：%d 条（%s ~ %s）", len(results_map), min(dates), max(dates))
+
         for match in pending_matches:
-            actual, score = await _fetch_result(source_manager, match)
+            actual, score = results_map.get(str(match.sporttery_id), (None, None))
+            if actual is None:
+                # 降级：在售接口（当天完赛）→ The Odds API
+                actual, score = await _fetch_result(source_manager, match)
             if actual is None:
                 continue
 
@@ -218,28 +228,38 @@ async def _auto_save_backtest(session, match) -> None:
 
     try:
         from config import get_settings
-        from core.data.snapshot import SnapshotManager
+        from core.data.snapshot import SnapshotManager, compute_clv_fields
         snap = SnapshotManager(db_path=get_settings().duckdb_path)
         try:
+            # CLV（ADR-006）：pick 优先取实际推荐方向 final_outcome，fallback argmax
+            probs_dict = pred.fused_probs or pred.stat_probs
+            recommended = (pred.tickets or {}).get("final_outcome")
+            pick, entry_odds, close_odds, clv = await compute_clv_fields(
+                snap, match.id, probs_dict, match.sporttery_odds, recommended
+            )
             await snap.save_backtest_result(
                 match_id=match.id,
-                predicted=pred.fused_probs or pred.stat_probs,
+                predicted=probs_dict,
                 actual=match.actual_result,
                 user_id=pred.user_id or 0,
                 market_odds=match.sporttery_odds,
+                pick=pick,
+                entry_odds=entry_odds,
+                close_odds=close_odds,
+                clv=clv,
             )
         finally:
             snap.close()
-        logger.debug("回测自动写入 match_id=%d actual=%s", match.id, match.actual_result)
+        logger.debug("回测自动写入 match_id=%d actual=%s clv=%s", match.id, match.actual_result, clv)
     except Exception as exc:
         logger.debug("回测自动写入失败 match_id=%d: %s", match.id, exc)
 
 
 async def _fetch_result(source_manager, match) -> tuple[str | None, str | None]:
     """尝试从多个数据源获取赛果，返回 (H/D/A | None, score | None)。"""
-    # 1. 竞彩 API
+    # 1. 竞彩 API（在售接口降级，仅对当天完赛有效）
     try:
-        result, score = await source_manager.get_match_result(match.sporttery_id)
+        result, score = await source_manager.get_match_result(match)
         if result:
             return result, score
     except Exception as exc:
@@ -318,14 +338,15 @@ async def run_auto_ticket(
     user_id: int | None = None,
     trigger: str = "scheduled",
     db=None,
+    stake: float | None = None,
 ) -> int:
     """
     自动出票：复用当日已有 Prediction，调用票型生成，写入 AutoTicketRun。
-    返回新记录的 id。
+    返回新记录的 id。stake 为单用户预算，None 时回退 env 默认值。
     """
     from datetime import date as _date
     from sqlalchemy import select as sa_select
-    from db.models import AutoTicketRun, LLMConfig, Match, Prediction
+    from db.models import AutoTicketRun, DataSourceConfig, LLMConfig, Match, Prediction
     from db.session import AsyncSessionLocal
     from config import get_settings
 
@@ -340,6 +361,39 @@ async def run_auto_ticket(
         session = db
 
     try:
+        # 定时触发且未指定用户：读取 UI 设置页（DataSourceConfig）中所有启用
+        # 自动出票的用户，逐用户出票（每用户独立预算、当日幂等）
+        if user_id is None and trigger == "scheduled":
+            cfg_result = await session.execute(
+                sa_select(DataSourceConfig).where(
+                    DataSourceConfig.source_name == "auto_ticket",
+                    DataSourceConfig.enabled == True,  # noqa: E712
+                )
+            )
+            cfgs = cfg_result.scalars().all()
+            if not cfgs:
+                logger.info("auto_ticket: 无启用自动出票的用户，跳过")
+                return 0
+            last_id = 0
+            for cfg in cfgs:
+                dup = await session.execute(
+                    sa_select(AutoTicketRun.id).where(
+                        AutoTicketRun.user_id == cfg.user_id,
+                        AutoTicketRun.run_date == today,
+                        AutoTicketRun.trigger == "scheduled",
+                    )
+                )
+                if dup.scalars().first() is not None:
+                    logger.info("auto_ticket: 用户 %s 今日已有定时出票，跳过", cfg.user_id)
+                    continue
+                user_stake = float((cfg.extra_config or {}).get("stake") or 0) or None
+                last_id = await run_auto_ticket(
+                    user_id=cfg.user_id, trigger="scheduled",
+                    db=session, stake=user_stake,
+                )
+            return last_id
+
+        effective_stake = stake if stake and stake > 0 else settings.auto_ticket_stake
         # 查当日已分析的赛事
         matches_result = await session.execute(
             sa_select(Match).where(Match.sale_date == str(today))
@@ -437,7 +491,7 @@ async def run_auto_ticket(
             logger.warning("近 5 次出票 ROI=%.1f%%，触发回撤保护（stake 减半）", recent_roi * 100)
 
         tickets_json = _build_auto_tickets(
-            generator, all_match_data, budget=settings.auto_ticket_stake, recent_roi=recent_roi
+            generator, all_match_data, budget=effective_stake, recent_roi=recent_roi
         )
 
         # Pre-embed team names in leg dicts for historical display (avoids N+1 at read time)
@@ -461,7 +515,7 @@ async def run_auto_ticket(
             },
             match_ids=[d["match"].id for d in all_match_data],
             tickets_json=tickets_json,
-            stake=settings.auto_ticket_stake,
+            stake=effective_stake,
             sync_status="pending",
         )
         session.add(run)
@@ -495,8 +549,12 @@ def _compute_run_roi(run) -> float | None:
         legs = scheme.get("legs", [])
         if not legs:
             continue
+        # 只能正确结算 HAD/HHAD 市场：比分等方案（total_odds 为估算 0）跳过，
+        # 否则 "2-1" 永不等于 "主胜" 必输 → ROI 系统性低估 → 误触发回撤保护
+        if any(leg.get("market") not in ("胜平负", "让球胜平负", None) for leg in legs):
+            continue
         settled = True
-        all_won = True
+        leg_won: list[bool] = []
         for leg in legs:
             res = run.results_json.get(str(leg.get("match_id")))
             if not res or not res.get("actual"):
@@ -511,16 +569,39 @@ def _compute_run_roi(run) -> float | None:
             else:
                 actual_pick = outcome_map.get(res["actual"])
             picks = leg.get("picks") or [leg.get("pick")]
-            if actual_pick not in picks:
-                all_won = False
+            leg_won.append(actual_pick in picks)
         if not settled:
             continue
         stake = float(scheme.get("total_stake") or 0)
+        scheme_odds = float(scheme.get("total_odds") or 0)
         if stake <= 0:
             continue
+
+        combo_sizes = scheme.get("combo_sizes")
+        if combo_sizes:
+            # M串N 容错方案：按子组合枚举结算，中奖子组合独立派奖
+            from itertools import combinations
+            num_combos = max(int(scheme.get("num_combos") or 1), 1)
+            per_bet = stake / num_combos
+            for k in combo_sizes:
+                for idxs in combinations(range(len(legs)), k):
+                    if not all(leg_won[i] for i in idxs):
+                        continue
+                    bets = 1
+                    odds_prod = 1.0
+                    for i in idxs:
+                        bets *= int(legs[i].get("num_picks") or 1)
+                        odds_prod *= float(legs[i].get("odds") or 0)
+                    if odds_prod > 0:
+                        total_payout += per_bet * bets * odds_prod
+            total_stake += stake
+            continue
+
+        if scheme_odds <= 0:
+            continue
         total_stake += stake
-        if all_won:
-            total_payout += stake * float(scheme.get("total_odds") or 1.0)
+        if all(leg_won):
+            total_payout += stake * scheme_odds
 
     if total_stake <= 0:
         return None
@@ -583,9 +664,9 @@ async def _sync_one_auto_ticket_run(run, session) -> None:
             errors.append(f"match#{mid}: not_found")
             continue
         if match.actual_result is None:
-            from datetime import datetime as _dt2, timezone
-            now_utc = _dt2.utcnow()
-            if match.kickoff_at and match.kickoff_at < now_utc:
+            from datetime import datetime as _dt2, timedelta as _td
+            now_bj = _dt2.utcnow() + _td(hours=8)  # kickoff_at 存北京时间（naive）
+            if match.kickoff_at and match.kickoff_at < now_bj:
                 errors.append(f"match#{mid}: score_missing")
             else:
                 errors.append(f"match#{mid}: no_result_yet")
@@ -674,6 +755,9 @@ async def retrain_model(seasons: int = 3):
             logger.warning("历史数据解析后为空，放弃训练")
             return None
 
+        # 显式按日期升序（_date_diff 降序），保证 [-100:] 是最近的比赛；
+        # 注意 apply_time_decay 返回的新 MatchRecord 不带 _date_diff，必须在 decay 前排序
+        records.sort(key=lambda r: -getattr(r, "_date_diff", 0))
         records_with_weights = apply_time_decay(records, today)
         params = fit(records_with_weights)
         logger.info(
@@ -693,27 +777,38 @@ async def retrain_model(seasons: int = 3):
             from core.modeling.dixon_coles import predict_probs
             from config import get_settings
 
-            # 用最近 100 场比赛做留出验证，计算真实 Brier / log-loss
-            validation = records_with_weights[-100:] if len(records_with_weights) > 100 else records_with_weights
-            brier_sum = log_loss_sum = 0.0
+            # 留出验证（样本外）：数据充足时用 records[:-100] 单独拟合评估参数，
+            # 在最近 100 场上计算 Brier / log-loss / RPS；不足则跳过晋升。
+            # 注意：生产 params 仍用全量数据训练（上面），此处仅为诚实的晋升指标。
+            from core.modeling.metrics import rps as _rps
+            brier_sum = log_loss_sum = rps_sum = 0.0
             n_val = 0
-            for m in validation:
-                probs = predict_probs(params, m.home_team, m.away_team)
-                actual = "H" if m.home_goals > m.away_goals else ("D" if m.home_goals == m.away_goals else "A")
-                outcome_map = {"H": 0, "D": 1, "A": 2}
-                oi = outcome_map.get(actual, 0)
-                p = [probs["home"], probs["draw"], probs["away"]]
-                # Brier: sum((p_i - o_i)^2)
-                brier_sum += sum((p[j] - (1.0 if j == oi else 0.0)) ** 2 for j in range(3))
-                # log-loss: -log(p_actual)
-                log_loss_sum += -math.log(max(p[oi], 1e-9))
-                n_val += 1
+            if len(records_with_weights) > 150:
+                train_records = records_with_weights[:-100]
+                validation = records_with_weights[-100:]
+                eval_params = fit(train_records)
+                for m in validation:
+                    probs = predict_probs(eval_params, m.home_team, m.away_team)
+                    actual = "H" if m.home_goals > m.away_goals else ("D" if m.home_goals == m.away_goals else "A")
+                    outcome_map = {"H": 0, "D": 1, "A": 2}
+                    oi = outcome_map.get(actual, 0)
+                    p = [probs["home"], probs["draw"], probs["away"]]
+                    # Brier: sum((p_i - o_i)^2)
+                    brier_sum += sum((p[j] - (1.0 if j == oi else 0.0)) ** 2 for j in range(3))
+                    # log-loss: -log(p_actual)
+                    log_loss_sum += -math.log(max(p[oi], 1e-9))
+                    # RPS: 累积分布平方差（ADR-006）
+                    rps_sum += _rps(p, oi)
+                    n_val += 1
+            else:
+                logger.info("数据量 %d ≤ 150，无法做样本外验证，跳过晋升", len(records_with_weights))
 
             if n_val > 0:
                 metrics = ModelMetrics(
                     brier=round(brier_sum / n_val, 4),
                     log_loss=round(log_loss_sum / n_val, 4),
-                    rps=0.0, ece=0.0,
+                    rps=round(rps_sum / n_val, 4),
+                    ece=0.0,
                     n=n_val,
                 )
             else:

@@ -367,11 +367,15 @@ class DailyPipeline:
                 system=system_prompt,
                 max_tokens=2048,
             )
+            from core.llm.usage import record_llm_usage
+            await record_llm_usage(llm_client.db_config_id, llm_client.last_usage)
             parsed = _parse_llm_response(raw_text)
             parsed["raw_text"] = raw_text
             return parsed
         except Exception as e:
             logger.error("LLM 调用失败 match_id=%d: %s", match.id, e)
+            from core.llm.usage import record_llm_usage
+            await record_llm_usage(llm_client.db_config_id, llm_client.last_usage, error=str(e))
             result = _default_llm_result()
             result["intel_summary"] = f"LLM 分析失败：{e}"
             return result
@@ -652,6 +656,7 @@ class DailyPipeline:
                         intel_summary=pred.intel_summary or "",
                         risk_label=pred.risk_label or "",
                         confidence=pred.confidence or 0.5,
+                        market_odds=match.sporttery_odds,  # 预测时刻赔率快照（ADR-006 CLV entry 价）
                     )
         finally:
             await session.close()
@@ -761,12 +766,14 @@ class DailyPipeline:
             cfg = result.scalar_one_or_none()
 
         if cfg:
-            return LLMClient(ClientLLMConfig(
+            client = LLMClient(ClientLLMConfig(
                 provider=cfg.provider.value,
                 model=cfg.model,
                 api_key=cfg.api_key,
                 base_url=cfg.base_url,
             ))
+            client.db_config_id = cfg.id  # 用于用量/状态回写
+            return client
 
         settings = get_settings()
         api_key = getattr(settings, "system_llm_api_key", None)

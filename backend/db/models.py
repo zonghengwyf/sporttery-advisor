@@ -48,6 +48,14 @@ class LLMConfig(Base):
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
+    # 状态与用量（由 record_llm_usage / 连通性测试回写）
+    status: Mapped[str] = mapped_column(String(20), default="unknown")  # ok/error/unknown
+    last_error: Mapped[str | None] = mapped_column(Text)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime)
+    total_calls: Mapped[int] = mapped_column(Integer, default=0)
+    total_prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    total_completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+
     user: Mapped["User"] = relationship(back_populates="llm_configs")
 
 

@@ -128,6 +128,9 @@ class ParlayPlan:
     total_stake: float       # base_stake × num_combos × multiplier
     theoretical_prize: float # 单注潜在奖金估算
     win_probability: float   # 理论中奖概率
+    # M串N 容错方案时的子组合串级（如 [2,3,4] 表示全部 2串1/3串1/4串1 子组合）；
+    # None 或 [n] 表示普通 n串1
+    combo_sizes: list[int] | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -137,6 +140,7 @@ class ParlayPlan:
             "score":             self.score,
             "stars":             self.stars,
             "parlay_type":       self.parlay_type,
+            "combo_sizes":       self.combo_sizes,
             "legs":              [leg.to_dict() for leg in self.legs],
             "total_odds":        round(self.total_odds, 2),
             "base_stake":        self.base_stake,
@@ -479,6 +483,16 @@ class TicketGenerator:
                 continue
             plan = _build_plan(plan_id, name, legs, base_stake, multiplier, budget)
             plans.append(plan)
+            # 3~4 场且全单选腿：追加 M串N 容错方案（全部 2串1~n串1 子组合，
+            # 错 1~(n-2) 场仍有奖）。多选腿注数会爆炸、竞彩无对应官方命名，不做容错。
+            n = len(legs)
+            if 3 <= n <= 4 and all(l.num_picks == 1 for l in legs):
+                cover = _build_plan(
+                    f"{plan_id}_cover", f"{name}·容错", legs,
+                    base_stake, multiplier, budget,
+                    combo_sizes=list(range(2, n + 1)),
+                )
+                plans.append(cover)
 
         # Kelly 动态调整注额（含回撤保护）
         if plans:
@@ -796,24 +810,68 @@ def _build_plan(
     base_stake: float,
     multiplier: int,
     budget: float,
+    combo_sizes: list[int] | None = None,
 ) -> ParlayPlan:
+    """构建串关方案。combo_sizes=None 为普通 n串1；传 [2..n] 为 M串N 容错方案。"""
+    from itertools import combinations
+
     n = len(legs)
-    parlay_type = f"{n}串1"
-    total_odds = 1.0
-    win_prob = 1.0
-    num_combos = 1
+    if combo_sizes is None:
+        combo_sizes = [n]
+    is_system = combo_sizes != [n]
 
-    for leg in legs:
-        total_odds *= leg.odds
-        win_prob *= leg.win_prob
-        num_combos *= leg.num_picks
+    # 枚举所有子组合（n串1 时仅 1 个；M串N 时为 ΣC(n,k) 个）
+    combos: list[tuple[tuple[int, ...], int, float, float]] = []  # (腿索引, 注数, 赔率积, 中奖概率)
+    for k in combo_sizes:
+        for idxs in combinations(range(n), k):
+            num_bets = 1
+            odds_prod = 1.0
+            prob = 1.0
+            for i in idxs:
+                leg = legs[i]
+                num_bets *= leg.num_picks
+                odds_prod *= leg.odds
+                prob *= leg.win_prob
+            if k > 1:
+                prob *= 0.97 ** (k - 1)
+            combos.append((idxs, num_bets, odds_prod, prob))
 
-    if n > 1:
-        win_prob *= 0.97 ** (n - 1)
-
+    num_combos = sum(c[1] for c in combos)
     total_stake = base_stake * num_combos * multiplier
-    # 理论奖金：总注额 × 总赔率（多选腿时每个组合单注独立计算）
-    theoretical_prize = base_stake * num_combos * multiplier * total_odds
+
+    if not is_system:
+        parlay_type = f"{n}串1"
+        total_odds = combos[0][2]
+        win_prob = combos[0][3]
+        # 理论奖金：总注额 × 总赔率（多选腿时每个组合单注独立计算）
+        theoretical_prize = total_stake * total_odds
+    else:
+        parlay_type = f"{n}串{num_combos}"
+        # 枚举 2^n 种腿胜负结果（n≤5，开销可忽略），求：
+        #   win_probability = P(至少中 1 注) = P(胜腿数 ≥ 最小串级)
+        #   total_odds      = 中时条件期望派奖 / 总注额（Kelly/展示用的等效赔率）
+        k_min = min(combo_sizes)
+        p_any = 0.0
+        exp_payout = 0.0
+        for mask in range(1 << n):
+            wins = [bool(mask >> i & 1) for i in range(n)]
+            if sum(wins) < k_min:
+                continue
+            p_outcome = 1.0
+            for i, leg in enumerate(legs):
+                p_outcome *= leg.win_prob if wins[i] else (1.0 - leg.win_prob)
+            if p_outcome <= 0:
+                continue
+            payout = 0.0
+            for idxs, num_bets, odds_prod, _ in combos:
+                if all(wins[i] for i in idxs):
+                    payout += base_stake * multiplier * num_bets * odds_prod
+            p_any += p_outcome
+            exp_payout += p_outcome * payout
+        win_prob = p_any
+        cond_payout = exp_payout / p_any if p_any > 0 else 0.0
+        total_odds = cond_payout / total_stake if total_stake > 0 else 0.0
+        theoretical_prize = cond_payout
 
     avg_prob = win_prob ** (1 / n) if n > 0 else 0
     all_no_votes = all(leg.model_votes_total == 0 for leg in legs)
@@ -826,10 +884,13 @@ def _build_plan(
     )
     base_score = avg_prob * 100
     consensus_bonus = avg_consensus * 20
-    odds_penalty = max(0, (5 - total_odds) * 3) if plan_id == "conservative" else 0
+    odds_penalty = max(0, (5 - total_odds) * 3) if plan_id.startswith("conservative") else 0
     score = max(5, min(99, round(base_score + consensus_bonus - odds_penalty)))
     stars = _score_to_stars(score)
     tag = _build_tag(plan_id, legs, avg_consensus, win_prob)
+    if is_system:
+        tolerate = n - min(combo_sizes)
+        tag = f"{parlay_type} 容错，错 {tolerate} 场仍有奖 | {tag}"
 
     return ParlayPlan(
         plan_id=plan_id,
@@ -846,6 +907,7 @@ def _build_plan(
         total_stake=total_stake,
         theoretical_prize=theoretical_prize,
         win_probability=win_prob,
+        combo_sizes=combo_sizes if is_system else None,
     )
 
 
@@ -920,8 +982,8 @@ def _build_tag(plan_id: str, legs: list[ParlayLeg], avg_consensus: float, win_pr
     consensus_str = f"AI {round(avg_consensus * 100):.0f}% 共识" if avg_consensus > 0 else ""
     win_pct = f"理论中奖率 {win_prob * 100:.0f}%"
 
-    if plan_id == "conservative":
+    if plan_id.startswith("conservative"):
         return f"{n} 场，{multi_str}{consensus_str}，稳健型首选，{win_pct}"
-    if plan_id == "balanced":
+    if plan_id.startswith("balanced"):
         return f"均衡串关，{multi_str}{consensus_str}，{win_pct}"
     return f"高赔率冷门组合，{multi_str}小额博高奖，{win_pct}"

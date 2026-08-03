@@ -134,7 +134,10 @@ function switchToAuto() {
 
 // ── 通用工具函数 ─────────────────────────────────────────────────
 function planLabel(planId: string) {
-  return { conservative: '稳健', balanced: '均衡', high_odds: '博高赔', scoreline: '比分', manual: '手动' }[planId] ?? planId
+  const isCover = planId.endsWith('_cover')
+  const base = isCover ? planId.slice(0, -6) : planId
+  const label = { conservative: '稳健', balanced: '均衡', high_odds: '博高赔', scoreline: '比分', manual: '手动' }[base] ?? planId
+  return isCover ? label + '·容错' : label
 }
 
 function statusLabel(s: string) {
@@ -338,7 +341,7 @@ const schemeAccuracy = computed<Record<string, SchemeAcc>>(() => {
   for (const run of autoRuns.value) {
     if (run.sync_status === 'pending' || run.sync_status === 'skipped') continue
     for (const scheme of run.schemes ?? []) {
-      const pid = scheme.plan_id
+      const pid = scheme.plan_id.replace(/_cover$/, '')  // 容错方案归入基础策略统计
       if (!groups[pid]) continue
       if (scheme.status === 'won' || scheme.status === 'lost') {
         groups[pid].total++
@@ -477,7 +480,7 @@ const schemeRoi = computed<Record<string, SchemeRoiAcc>>(() => {
   for (const run of autoRuns.value) {
     for (const scheme of run.schemes ?? []) {
       if (scheme.status === 'pending' || scheme.profit == null) continue
-      const pid = scheme.plan_id
+      const pid = scheme.plan_id.replace(/_cover$/, '')  // 容错方案归入基础策略
       if (!groups[pid]) groups[pid] = { stake: 0, profit: 0, count: 0 }
       groups[pid].stake += run.stake
       groups[pid].profit += scheme.profit

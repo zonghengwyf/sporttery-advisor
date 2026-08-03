@@ -792,6 +792,7 @@ def _build_schemes(plans, enriched_preds) -> dict:
             "legs":              legs_out,
             "total_odds":        plan.total_odds,
             "parlay_type":       plan.parlay_type,
+            "combo_sizes":       plan.combo_sizes,
             "num_combos":        plan.num_combos,
             "stake":             plan.total_stake,
             "win_probability":   plan.win_probability,
@@ -807,12 +808,13 @@ def _build_schemes(plans, enriched_preds) -> dict:
 
 
 def _risk_label_for(key: str) -> str:
+    base = key[:-6] if key.endswith("_cover") else key
     return {
         "conservative": "低风险",
         "balanced":     "中风险",
         "high_odds":    "高风险",
         "scoreline":    "极高风险",
-    }.get(key, "中风险")
+    }.get(base, "中风险")
 
 
 def _empty_plans_reason(enriched_preds: list[dict]) -> str:

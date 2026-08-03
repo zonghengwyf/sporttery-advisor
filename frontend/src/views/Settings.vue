@@ -16,6 +16,12 @@ interface LLMConfig {
   _new_api_key?: string  // write-only: user-entered key when editing existing config
   base_url: string | null
   is_default: boolean
+  status?: string                  // ok / error / unknown
+  last_error?: string | null
+  last_used_at?: string | null
+  total_calls?: number
+  total_prompt_tokens?: number
+  total_completion_tokens?: number
   _confirmDelete?: boolean
   _open?: boolean
 }
@@ -60,11 +66,13 @@ interface AutoTicketConfig {
   enabled: boolean
   cron: string
   sync_cron: string
+  stake: number
 }
 const autoTicket = ref<AutoTicketConfig>({
   enabled: false,
   cron: '30 9 * * *',
   sync_cron: '0 2 * * *',
+  stake: 100,
 })
 const newProvider = ref<string>('deepseek')
 const loading = ref(true)
@@ -185,6 +193,12 @@ async function load() {
 }
 
 // ── LLM ────────────────────────────────────────────────────────────────────
+function fmtTokens(n?: number): string {
+  const v = n ?? 0
+  if (v >= 1_000_000) return (v / 1_000_000).toFixed(1) + 'M'
+  if (v >= 1_000) return (v / 1_000).toFixed(1) + 'k'
+  return String(v)
+}
 function addLLM() {
   const provider = newProvider.value || 'deepseek'
   const meta = PROVIDER_META[provider]
@@ -315,9 +329,13 @@ async function testLLM(cfg: LLMConfig) {
   testingLLM.value = cfg.id
   try {
     const { data } = await api.post(`/settings/llm/${cfg.id}/test`)
-    llmResult.value[cfg.id] = (data.success || data.ok)
+    const ok = !!(data.success || data.ok)
+    llmResult.value[cfg.id] = ok
       ? { ok: true,  msg: '连接成功' }
       : { ok: false, msg: data.error || '连接失败' }
+    cfg.status = ok ? 'ok' : 'error'
+    cfg.last_error = ok ? null : (data.error || '连接失败')
+    cfg.total_calls = (cfg.total_calls ?? 0) + (ok ? 1 : 0)
   } catch {
     llmResult.value[cfg.id!] = { ok: false, msg: '连接失败' }
   } finally {
@@ -521,6 +539,15 @@ onMounted(load)
                 :class="llmResult[cfg.id].ok ? 'lc-tag--ok' : 'lc-tag--err'">
                 {{ llmResult[cfg.id].ok ? '✓ 连通' : '✗ 失败' }}
               </span>
+              <span v-else-if="cfg.id && cfg.status && cfg.status !== 'unknown'" class="lc-tag"
+                :class="cfg.status === 'ok' ? 'lc-tag--ok' : 'lc-tag--err'"
+                :title="cfg.last_error || ''">
+                {{ cfg.status === 'ok' ? '● 正常' : '● 异常' }}
+              </span>
+              <span v-if="cfg.id && (cfg.total_calls ?? 0) > 0" class="lc-tag lc-tag--muted"
+                :title="`输入 ${fmtTokens(cfg.total_prompt_tokens)} / 输出 ${fmtTokens(cfg.total_completion_tokens)} tokens`">
+                {{ cfg.total_calls }} 次 · {{ fmtTokens((cfg.total_prompt_tokens ?? 0) + (cfg.total_completion_tokens ?? 0)) }}
+              </span>
               <span v-if="cfg.is_default" class="lc-tag lc-tag--gold">★ 默认</span>
             </div>
             <svg class="lc-chevron" :class="{ open: cfg._open }" width="14" height="14" viewBox="0 0 20 20" fill="currentColor">
@@ -603,6 +630,8 @@ onMounted(load)
                 <template v-else>
                   <span v-if="cfg.id && llmResult[cfg.id]" class="lc-result"
                     :class="llmResult[cfg.id].ok ? 'ok' : 'err'">{{ llmResult[cfg.id].msg }}</span>
+                  <span v-else-if="cfg.id && cfg.status === 'error' && cfg.last_error"
+                    class="lc-result err" :title="cfg.last_error">最近错误：{{ cfg.last_error.slice(0, 60) }}</span>
                   <span v-else style="flex:1"></span>
                   <div class="lc-foot-r">
                     <button v-if="!cfg.is_default" class="lc-btn-text" @click="setDefault(cfg)">设为默认</button>
@@ -886,11 +915,20 @@ onMounted(load)
             <input class="input at-time-input" type="time" v-model="syncTime" :disabled="!autoTicket.enabled" />
           </div>
 
+          <!-- 每日预算 -->
+          <div class="at-row">
+            <div class="at-meta">
+              <span class="at-title">每日出票预算</span>
+              <span class="at-desc">Kelly 分配的上限金额（元），保存后下一轮出票即生效</span>
+            </div>
+            <input class="input at-time-input" type="number" min="2" step="1" v-model.number="autoTicket.stake" :disabled="!autoTicket.enabled" />
+          </div>
+
           <div class="at-divider" />
 
           <!-- 提示 + 保存 -->
           <div class="at-foot">
-            <span class="at-foot-hint">修改后需重启 worker 服务生效</span>
+            <span class="at-foot-hint">开关与预算即时生效；出票/同步时间需重启 worker 生效</span>
             <button class="btn btn-primary btn-sm" :disabled="saving" @click="saveAutoTicket">
               {{ saving ? '保存中…' : '保存配置' }}
             </button>
@@ -1180,6 +1218,13 @@ onMounted(load)
   color: var(--gold);
   border-color: color-mix(in srgb, var(--gold) 35%, transparent);
   background: color-mix(in srgb, var(--gold) 8%, transparent);
+}
+.lc-tag--muted {
+  color: var(--text3);
+  border-color: color-mix(in srgb, var(--text3) 30%, transparent);
+  background: color-mix(in srgb, var(--text3) 6%, transparent);
+  text-transform: none;
+  letter-spacing: 0;
 }
 
 .lc-fix-btn {
