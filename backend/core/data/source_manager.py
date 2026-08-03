@@ -32,20 +32,32 @@ class SourceManager:
 
     # ── 赛果获取 ──────────────────────────────────────────────────────────────
 
-    async def get_match_result(self, sporttery_id: str) -> tuple[str | None, str | None]:
+    async def get_match_result(self, match) -> tuple[str | None, str | None]:
         """
         尝试从竞彩官方接口获取赛果，返回 (H/D/A | None, score | None)。
         """
         try:
-            return await asyncio.to_thread(self._fetch_sporttery_result, sporttery_id)
+            match_date = match.kickoff_at.date() if getattr(match, "kickoff_at", None) else None
+            return await asyncio.to_thread(
+                self._fetch_sporttery_result, match.sporttery_id, match_date
+            )
         except Exception as exc:
-            logger.debug("竞彩赛果接口失败 sporttery_id=%s: %s", sporttery_id, exc)
+            logger.debug("竞彩赛果接口失败 sporttery_id=%s: %s", getattr(match, "sporttery_id", "?"), exc)
             return None, None
 
-    def _fetch_sporttery_result(self, sporttery_id: str) -> tuple[str | None, str | None]:
+    def _fetch_sporttery_result(self, sporttery_id: str, match_date=None) -> tuple[str | None, str | None]:
         """同步实现：从竞彩官方查询赛果，返回 (H/D/A | None, score | None)。"""
         from core.data.providers.sporttery import fetch_result_by_id
-        return fetch_result_by_id(sporttery_id)
+        return fetch_result_by_id(sporttery_id, match_date)
+
+    async def get_results_map(self, begin, end) -> dict[str, tuple[str | None, str | None]]:
+        """批量拉取 [begin, end] 日期范围内的赛果 {sporttery_id: (result, score)}。"""
+        try:
+            from core.data.providers.sporttery import fetch_results_between
+            return await asyncio.to_thread(fetch_results_between, begin, end)
+        except Exception as exc:
+            logger.debug("竞彩批量赛果接口失败 %s~%s: %s", begin, end, exc)
+            return {}
 
     async def get_odds_api_result(self, match) -> str | None:
         """

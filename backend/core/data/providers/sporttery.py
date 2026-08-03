@@ -10,6 +10,8 @@ from datetime import date, datetime
 from typing import Any
 
 OFFICIAL_URL = "https://webapi.sporttery.cn/gateway/jc/football/getMatchCalculatorV1.qry"
+# 赛果专用接口（已完赛比赛会从在售接口消失，必须用此接口查赛果）
+RESULT_URL = "https://webapi.sporttery.cn/gateway/jc/football/getMatchResultV1.qry"
 POOL_CODES = ("had", "hhad", "crs", "ttg", "hafu")
 POOL_LABELS = {
     "had": "胜平负",
@@ -82,15 +84,19 @@ _RESULT_CODE_MAP: dict[str, str] = {
 
 
 def _parse_result(item: dict[str, Any]) -> tuple[str | None, str | None]:
-    """从 API 响应项提取赛果和比分。返回 (H/D/A | None, "2-1" | None)。"""
+    """从 API 响应项提取赛果和比分。返回 (H/D/A | None, "2-1" | None)。
+    兼容在售接口（getMatchCalculatorV1）与赛果接口（getMatchResultV1）的字段差异。"""
     result_code: str | None = None
     score: str | None = None
 
-    # matchResult 字段
-    mr = str(item.get("matchResult") or "").strip()
-    result_code = _RESULT_CODE_MAP.get(mr)
+    # 结果字段（多候选键）
+    for key in ("matchResult", "matchResultHAD", "result", "winLostResult"):
+        mr = str(item.get(key) or "").strip()
+        if mr in _RESULT_CODE_MAP:
+            result_code = _RESULT_CODE_MAP[mr]
+            break
 
-    # homeScore / awayScore 字段
+    # 比分字段：优先 homeScore/awayScore 拆分键，其次 "2-1"/"2:1" 合并键
     try:
         hs = item.get("homeScore")
         as_ = item.get("awayScore")
@@ -107,15 +113,32 @@ def _parse_result(item: dict[str, Any]) -> tuple[str | None, str | None]:
     except (TypeError, ValueError):
         pass
 
+    if score is None:
+        for key in ("score", "sectionsNo1Score", "fullScore"):
+            raw = str(item.get(key) or "").strip()
+            if not raw:
+                continue
+            for sep in ("-", ":", "："):
+                if sep in raw:
+                    try:
+                        h_int, a_int = (int(x) for x in raw.split(sep)[:2])
+                    except ValueError:
+                        continue
+                    score = f"{h_int}-{a_int}"
+                    if result_code is None:
+                        result_code = "H" if h_int > a_int else ("A" if h_int < a_int else "D")
+                    break
+            if score is not None:
+                break
+
     return result_code, score
 
 
-def _fetch_raw_items() -> list[dict]:
-    """拉取竞彩官方接口全量数据项（不按日期过滤）。在 asyncio.to_thread 中调用。"""
-    url = OFFICIAL_URL + "?poolCode=had,hhad,crs,ttg,hafu&channel=c"
+def _get_json(url: str, referer: str = "https://m.sporttery.cn/") -> dict:
+    """带代理降级链的 GET JSON。失败抛 ProviderError。"""
     headers = {
         "User-Agent": _UA,
-        "Referer": "https://m.sporttery.cn/",
+        "Referer": referer,
         "Accept-Language": "zh-CN,zh;q=0.9",
         "Accept": "application/json",
     }
@@ -133,6 +156,12 @@ def _fetch_raw_items() -> list[dict]:
             last_err = exc
     if payload is None:
         raise ProviderError(f"竞彩官方接口不可达：{last_err}")
+    return payload
+
+
+def _fetch_raw_items() -> list[dict]:
+    """拉取竞彩官方接口全量数据项（不按日期过滤）。在 asyncio.to_thread 中调用。"""
+    payload = _get_json(OFFICIAL_URL + "?poolCode=had,hhad,crs,ttg,hafu&channel=c")
     groups = (payload.get("value") or {}).get("matchInfoList")
     if not isinstance(groups, list):
         raise ProviderError("竞彩官方响应结构已变化（缺少 value.matchInfoList）")
@@ -143,8 +172,45 @@ def _fetch_raw_items() -> list[dict]:
     return items
 
 
-def fetch_result_by_id(sporttery_id: str) -> tuple[str | None, str | None]:
-    """按 sporttery_id 查询赛果，返回 (H/D/A | None, score | None)。在 asyncio.to_thread 中调用。"""
+def fetch_results_between(begin: date, end: date) -> dict[str, tuple[str | None, str | None]]:
+    """批量拉取赛果（getMatchResultV1，按日期范围分页）。
+    返回 {matchId: (H/D/A | None, score | None)}。接口不可达时抛 ProviderError。"""
+    out: dict[str, tuple[str | None, str | None]] = {}
+    page = 1
+    while page <= 20:  # 安全上限
+        url = (
+            f"{RESULT_URL}?matchPage={page}"
+            f"&matchBeginDate={begin.isoformat()}&matchEndDate={end.isoformat()}"
+            f"&leagueId=&pageSize=100&isFix=0&pcOrWap=1"
+        )
+        payload = _get_json(url, referer="https://www.sporttery.cn/")
+        data = payload.get("data") or {}
+        items = data.get("matchResultList") or []
+        for item in items:
+            mid = str(item.get("matchId") or "")
+            if mid:
+                out[mid] = _parse_result(item)
+        try:
+            total = int(data.get("totalRecord") or 0)
+        except (TypeError, ValueError):
+            total = 0
+        if not items or page * 100 >= total:
+            break
+        page += 1
+    return out
+
+
+def fetch_result_by_id(sporttery_id: str, match_date: date | None = None) -> tuple[str | None, str | None]:
+    """按 sporttery_id 查询赛果，返回 (H/D/A | None, score | None)。在 asyncio.to_thread 中调用。
+    优先走赛果专用接口（按比赛日期 ±1 天）；失败降级在售接口（仅对当天完赛有效）。"""
+    if match_date is not None:
+        from datetime import timedelta
+        try:
+            results = fetch_results_between(match_date - timedelta(days=1), match_date + timedelta(days=1))
+            if sporttery_id in results:
+                return results[sporttery_id]
+        except ProviderError:
+            pass  # 降级在售接口
     try:
         items = _fetch_raw_items()
     except ProviderError:

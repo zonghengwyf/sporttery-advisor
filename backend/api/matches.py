@@ -61,7 +61,7 @@ async def list_matches(
             logger.warning("实时同步竞彩赛单失败，返回缓存数据：%s", exc)
 
     if sale_date == "all":
-        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=3)
+        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=8 - 3)  # kickoff_at 存北京时间
         result = await db.execute(
             select(Match).where(Match.kickoff_at >= cutoff).order_by(Match.kickoff_at)
         )
