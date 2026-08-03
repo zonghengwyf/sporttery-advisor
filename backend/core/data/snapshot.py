@@ -66,6 +66,10 @@ class SnapshotManager:
                 ("home_odds",   "FLOAT"),
                 ("draw_odds",   "FLOAT"),
                 ("away_odds",   "FLOAT"),
+                ("pick",        "VARCHAR(1)"),   # ADR-006 CLV 追踪
+                ("entry_odds",  "FLOAT"),
+                ("close_odds",  "FLOAT"),
+                ("clv",         "FLOAT"),
             ]:
                 try:
                     con.execute(
@@ -73,6 +77,12 @@ class SnapshotManager:
                     )
                 except Exception:
                     pass  # column already exists
+            try:
+                con.execute(
+                    "ALTER TABLE prediction_snapshots ADD COLUMN market_odds TEXT"
+                )
+            except Exception:
+                pass  # column already exists
         finally:
             con.close()
 
@@ -88,10 +98,12 @@ class SnapshotManager:
         intel_summary: str,
         risk_label: str,
         confidence: float,
+        market_odds: dict | None = None,
     ) -> None:
         db_path = self.db_path
         stat_json   = json.dumps(stat_probs)
         fused_json  = json.dumps(fused_probs)
+        odds_json   = json.dumps(market_odds) if market_odds else None
 
         def _insert():
             import duckdb
@@ -101,17 +113,42 @@ class SnapshotManager:
                     """
                     INSERT INTO prediction_snapshots
                         (match_id, run_id, kickoff_at, stat_probs, fused_probs,
-                         intel_summary, risk_label, confidence)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                         intel_summary, risk_label, confidence, market_odds)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [match_id, run_id, kickoff_at,
                      stat_json, fused_json,
-                     intel_summary, risk_label, confidence],
+                     intel_summary, risk_label, confidence, odds_json],
                 )
             finally:
                 con.close()
 
         await asyncio.to_thread(_insert)
+
+    async def get_latest_prediction_odds(self, match_id: int) -> dict | None:
+        """返回某场比赛最近一次预测快照中的赔率（预测时刻 entry 价，ADR-006）。"""
+        db_path = self.db_path
+
+        def _query():
+            import duckdb
+            con = duckdb.connect(db_path, read_only=True)
+            try:
+                row = con.execute(
+                    """
+                    SELECT market_odds FROM prediction_snapshots
+                    WHERE match_id = ? AND market_odds IS NOT NULL
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    [match_id],
+                ).fetchone()
+                return json.loads(row[0]) if row and row[0] else None
+            finally:
+                con.close()
+
+        try:
+            return await asyncio.to_thread(_query)
+        except Exception:
+            return None
 
     # ── 时间约束验证 ──────────────────────────────────────────────────────────
 
@@ -147,6 +184,10 @@ class SnapshotManager:
         as_of: datetime | None = None,
         kickoff_at: datetime | None = None,
         market_odds: dict | None = None,
+        pick: str | None = None,
+        entry_odds: float | None = None,
+        close_odds: float | None = None,
+        clv: float | None = None,
     ) -> None:
         self.validate_event_time(observed_at, as_of, kickoff_at)
 
@@ -175,10 +216,12 @@ class SnapshotManager:
                     "INSERT INTO backtest_results"
                     " (match_id, user_id, p_home, p_draw, p_away, actual,"
                     "  home_odds, draw_odds, away_odds,"
+                    "  pick, entry_odds, close_odds, clv,"
                     "  observed_at, as_of, kickoff_at)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     [match_id, user_id, p_home, p_draw, p_away, actual,
                      h_odds, d_odds, a_odds,
+                     pick, entry_odds, close_odds, clv,
                      observed_at, as_of, kickoff_at],
                 )
             finally:
@@ -208,7 +251,30 @@ class SnapshotManager:
                 ).fetchall()
                 if not rows:
                     return None
-                return _calc_metrics(rows)
+                metrics = _calc_metrics(rows)
+                # CLV 聚合（ADR-006）：仅统计有完整买入/收盘价的记录
+                try:
+                    clv_rows = con.execute(
+                        """
+                        SELECT clv FROM backtest_results
+                        WHERE user_id = ? AND recorded_at >= ? AND clv IS NOT NULL
+                        """,
+                        [user_id, cutoff],
+                    ).fetchall()
+                except Exception:
+                    clv_rows = []
+                if clv_rows:
+                    clvs = [r[0] for r in clv_rows]
+                    metrics["avg_clv"] = round(sum(clvs) / len(clvs), 4)
+                    metrics["clv_positive_ratio"] = round(
+                        sum(1 for c in clvs if c > 0) / len(clvs), 4
+                    )
+                    metrics["n_with_clv"] = len(clvs)
+                else:
+                    metrics["avg_clv"] = None
+                    metrics["clv_positive_ratio"] = None
+                    metrics["n_with_clv"] = 0
+                return metrics
             finally:
                 con.close()
 
@@ -306,7 +372,41 @@ def _brier_score(rows: list) -> float:
     return total / len(rows)
 
 
+# ── CLV 共享计算（ADR-006） ─────────────────────────────────────────────────
+
+async def compute_clv_fields(
+    snap,
+    match_id: int,
+    predicted: dict,
+    close_all: dict | None,
+    recommended: str | None = None,
+) -> tuple[str | None, float | None, float | None, float | None]:
+    """计算 (pick, entry_odds, close_odds, clv)。
+    pick 优先取实际推荐方向（tickets.final_outcome），否则 argmax 概率；
+    entry 为预测时刻快照赔率，close 为封盘赔率。数据不足时相应字段为 None。
+    供 workers/tasks._auto_save_backtest 与 api/backtest.record 复用。"""
+    if not predicted:
+        return None, None, None, None
+    p_map = {
+        "H": predicted.get("home", 0),
+        "D": predicted.get("draw", 0),
+        "A": predicted.get("away", 0),
+    }
+    if not any(p_map.values()):
+        return None, None, None, None
+    pick = recommended if recommended in ("H", "D", "A") else max(p_map, key=p_map.__getitem__)
+    key = {"H": "home", "D": "draw", "A": "away"}[pick]
+
+    entry_all = await snap.get_latest_prediction_odds(match_id)
+    entry_odds = float(entry_all[key]) if entry_all and entry_all.get(key) else None
+    close_odds = float(close_all[key]) if close_all and close_all.get(key) else None
+    clv = round(entry_odds / close_odds - 1, 4) if entry_odds and close_odds and close_odds > 0 else None
+    return pick, entry_odds, close_odds, clv
+
+
 def _calc_metrics(rows: list) -> dict:
+    from core.modeling.metrics import rps as _rps
+
     n = len(rows)
     brier_sum = log_loss_sum = rps_sum = 0.0
     buckets: dict[int, list] = {i: [] for i in range(10)}
@@ -319,10 +419,7 @@ def _calc_metrics(rows: list) -> dict:
 
         brier_sum += sum((p - i) ** 2 for p, i in zip(probs, indicators))
         log_loss_sum += -sum(i * math.log(max(p, eps)) for p, i in zip(probs, indicators))
-
-        cum_p = [probs[0], probs[0] + probs[1], 1.0]
-        cum_i = [indicators[0], indicators[0] + indicators[1], 1.0]
-        rps_sum += sum((cp - ci) ** 2 for cp, ci in zip(cum_p, cum_i)) / 2
+        rps_sum += _rps(probs, indicators.index(1.0))
 
         max_p = max(probs)
         max_idx = probs.index(max_p)

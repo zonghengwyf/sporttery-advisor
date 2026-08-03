@@ -42,6 +42,9 @@ async def get_backtest_metrics(
             "log_loss": None,
             "rps": None,
             "ece": None,
+            "avg_clv": None,
+            "clv_positive_ratio": None,
+            "n_with_clv": 0,
         },
         "chart": chart,
         "message": None if metrics else "暂无回测数据，录入比赛结果后自动更新",
@@ -172,17 +175,31 @@ async def record_result(
 
     try:
         from config import get_settings
-        from core.data.snapshot import SnapshotManager
+        from core.data.snapshot import SnapshotManager, compute_clv_fields
 
         cfg = get_settings()
         snap = SnapshotManager(db_path=cfg.duckdb_path)
-        await snap.save_backtest_result(
-            match_id=match_id,
-            predicted=pred.fused_probs or pred.stat_probs,
-            actual=actual,
-            user_id=pred.user_id or 0,
-        )
-        snap.close()
+        try:
+            # CLV（ADR-006）：与自动写入同口径，避免手动录入覆盖丢 CLV
+            match = await db.get(Match, match_id)
+            recommended = (pred.tickets or {}).get("final_outcome")
+            pick, entry_odds, close_odds, clv = await compute_clv_fields(
+                snap, match_id, pred.fused_probs or pred.stat_probs,
+                match.sporttery_odds if match else None, recommended,
+            )
+            await snap.save_backtest_result(
+                match_id=match_id,
+                predicted=pred.fused_probs or pred.stat_probs,
+                actual=actual,
+                user_id=pred.user_id or 0,
+                market_odds=match.sporttery_odds if match else None,
+                pick=pick,
+                entry_odds=entry_odds,
+                close_odds=close_odds,
+                clv=clv,
+            )
+        finally:
+            snap.close()
     except Exception as exc:
         raise HTTPException(500, detail=f"回测记录保存失败: {exc}")
 

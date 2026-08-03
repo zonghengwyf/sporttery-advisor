@@ -161,8 +161,10 @@ match_snapshots: id, sporttery_id, observed_at, sale_date,
                  home_team, away_team, league, sporttery_odds(json),
                  overseas_odds(json), source, raw_data(json)
 
-backtest_results: id, match_id, run_date, predicted(json),
-                  actual(H/D/A), brier, log_loss, rps
+backtest_results: id, match_id, user_id, p_home, p_draw, p_away,
+                  actual(H/D/A), home_odds, draw_odds, away_odds,
+                  pick, entry_odds, close_odds, clv,   -- CLV 追踪见 ADR-006
+                  observed_at, as_of, kickoff_at, recorded_at
 ```
 
 ## API 端点

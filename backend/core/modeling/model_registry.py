@@ -63,14 +63,21 @@ class ModelRecord:
 # Thresholds from football-prediction-skill audit
 _BRIER_MIN_IMPROVEMENT    = 0.001
 _LOG_LOSS_MIN_IMPROVEMENT = 0.001
+_RPS_MIN_IMPROVEMENT      = 0.001
 
 
 def should_promote(challenger: ModelMetrics, champion: ModelMetrics) -> bool:
-    """True when challenger meaningfully beats the current champion."""
-    return (
+    """True when challenger meaningfully beats the current champion.
+    RPS 门仅在 champion 已有真实 RPS（>0）时生效（ADR-006，向后兼容存量记录）。"""
+    base = (
         (champion.brier - challenger.brier) >= _BRIER_MIN_IMPROVEMENT
         and (champion.log_loss - challenger.log_loss) >= _LOG_LOSS_MIN_IMPROVEMENT
     )
+    if not base:
+        return False
+    if champion.rps > 0:
+        return (champion.rps - challenger.rps) >= _RPS_MIN_IMPROVEMENT
+    return True
 
 
 # ── ModelRegistry ─────────────────────────────────────────────────────────────
