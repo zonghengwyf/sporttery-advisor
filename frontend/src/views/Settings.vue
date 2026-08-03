@@ -507,6 +507,25 @@ onMounted(load)
           </div>
         </div>
 
+        <!-- Usage summary strip -->
+        <div v-if="llmConfigs.filter(c => c.id).length > 0" class="lc-summary">
+          <span class="lc-sum-item">
+            <span class="lc-sum-val font-num">{{ llmConfigs.reduce((a, c) => a + (c.total_calls ?? 0), 0) }}</span>
+            <span class="lc-sum-lbl">次调用</span>
+          </span>
+          <span class="lc-sum-sep">·</span>
+          <span class="lc-sum-item">
+            <span class="lc-sum-val font-num">{{ fmtTokens(llmConfigs.reduce((a, c) => a + (c.total_prompt_tokens ?? 0) + (c.total_completion_tokens ?? 0), 0)) }}</span>
+            <span class="lc-sum-lbl">总 tokens</span>
+          </span>
+          <span class="lc-sum-sep">·</span>
+          <span class="lc-sum-item">
+            <span class="lc-sum-val font-num">{{ llmConfigs.filter(c => c.status === 'ok').length }}</span>
+            <span class="lc-sum-lbl">/ {{ llmConfigs.filter(c => c.id).length }} 在线</span>
+          </span>
+          <span v-if="llmConfigs.some(c => c.status === 'error')" class="lc-sum-warn">⚠ 有配置异常</span>
+        </div>
+
         <!-- empty state -->
         <div v-if="llmConfigs.length === 0" class="lc-empty">
           <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">
@@ -895,6 +914,21 @@ onMounted(load)
             </label>
           </div>
 
+          <!-- Schedule preview timeline -->
+          <div class="at-timeline" :class="{ 'at-timeline--off': !autoTicket.enabled }">
+            <div class="at-tl-item">
+              <div class="at-tl-time font-num">{{ ticketTime }}</div>
+              <div class="at-tl-dot at-tl-dot--ticket"></div>
+              <div class="at-tl-label">每日出票</div>
+            </div>
+            <div class="at-tl-line"></div>
+            <div class="at-tl-item">
+              <div class="at-tl-time font-num">次日 {{ syncTime }}</div>
+              <div class="at-tl-dot at-tl-dot--sync"></div>
+              <div class="at-tl-label">同步赛果</div>
+            </div>
+          </div>
+
           <div class="at-divider" />
 
           <!-- 出票时间 -->
@@ -928,7 +962,7 @@ onMounted(load)
 
           <!-- 提示 + 保存 -->
           <div class="at-foot">
-            <span class="at-foot-hint">开关与预算即时生效；出票/同步时间需重启 worker 生效</span>
+            <span class="at-foot-hint">保存后 worker 自动热更新，无需重启</span>
             <button class="btn btn-primary btn-sm" :disabled="saving" @click="saveAutoTicket">
               {{ saving ? '保存中…' : '保存配置' }}
             </button>
@@ -1701,6 +1735,80 @@ onMounted(load)
   transition: transform .2s;
 }
 .s-toggle input:checked + .s-toggle-track .s-toggle-thumb { transform: translateX(14px); }
+
+/* ── LLM usage summary strip ─────────────────────────────────────────────── */
+.lc-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px 12px;
+  flex-wrap: wrap;
+}
+.lc-sum-item { display: flex; align-items: baseline; gap: 4px; }
+.lc-sum-val {
+  font-size: 16px;
+  font-weight: 800;
+  color: var(--text);
+  line-height: 1;
+}
+.lc-sum-lbl { font-size: 11px; color: var(--text3); }
+.lc-sum-sep { font-size: 11px; color: var(--line); }
+.lc-sum-warn {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--gold);
+  background: color-mix(in srgb, var(--gold) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--gold) 30%, transparent);
+  padding: 2px 7px;
+  border-radius: 10px;
+}
+
+/* ── Auto-ticket timeline ────────────────────────────────────────────────── */
+.at-timeline {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 14px 24px 10px;
+  background: color-mix(in srgb, var(--primary) 4%, var(--card));
+  border-bottom: var(--card-bd);
+  transition: opacity .2s;
+}
+.at-timeline--off { opacity: .38; }
+
+.at-tl-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+  min-width: 80px;
+}
+.at-tl-time {
+  font-family: var(--font-disp);
+  font-size: 20px;
+  font-weight: 900;
+  color: var(--text);
+  line-height: 1;
+  letter-spacing: -.5px;
+}
+.at-tl-dot {
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  border: 2px solid var(--card);
+  box-shadow: 0 0 0 2px;
+  flex-shrink: 0;
+}
+.at-tl-dot--ticket { background: var(--primary); box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 30%, transparent); }
+.at-tl-dot--sync { background: var(--blue, #1D4ED8); box-shadow: 0 0 0 2px color-mix(in srgb, var(--blue, #1D4ED8) 30%, transparent); }
+.at-tl-label { font-size: 10px; color: var(--text3); font-weight: 600; letter-spacing: .3px; text-transform: uppercase; font-family: var(--font-disp); }
+
+.at-tl-line {
+  flex: 1;
+  height: 2px;
+  background: repeating-linear-gradient(to right, var(--line) 0, var(--line) 4px, transparent 4px, transparent 8px);
+  margin: 0 8px;
+  margin-top: -14px;
+}
 
 /* ── Accordion body transition ───────────────────────────────────────────── */
 .ds-body-enter-active { transition: opacity .18s ease, transform .18s ease; }

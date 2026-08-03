@@ -40,22 +40,29 @@ class MatchOut(BaseModel):
         return str(v)
 
 
+def _bj_today() -> date:
+    return (datetime.utcnow() + timedelta(hours=8)).date()
+
+
 @router.get("/", response_model=list[MatchOut])
 async def list_matches(
-    sale_date: str = Query(default=str(date.today())),
+    sale_date: str = Query(default="today"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     global _last_sync_ts
-    today_str = str(date.today())
-    tomorrow_str = str(date.today() + timedelta(days=1))
+    bj_today = _bj_today()
+    today_str = str(bj_today)
+    tomorrow_str = str(bj_today + timedelta(days=1))
+    if sale_date == "today":
+        sale_date = today_str
     needs_sync = sale_date in ("all", today_str, tomorrow_str)
     if needs_sync and time.monotonic() - _last_sync_ts > _SYNC_COOLDOWN:
         try:
             from core.data.sync import sync_daily_matches
-            await sync_daily_matches(db, date.today())
+            await sync_daily_matches(db, bj_today)
             if sale_date in ("all", tomorrow_str):
-                await sync_daily_matches(db, date.today() + timedelta(days=1))
+                await sync_daily_matches(db, bj_today + timedelta(days=1))
             _last_sync_ts = time.monotonic()
         except Exception as exc:
             logger.warning("实时同步竞彩赛单失败，返回缓存数据：%s", exc)
@@ -141,13 +148,13 @@ async def set_match_result(
 
 @router.post("/sync")
 async def trigger_sync(
-    sale_date: str = Query(default=str(date.today())),
+    sale_date: str = Query(default="today"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """手动触发赛单同步（等同步完成后再返回）。"""
     from core.data.sync import sync_daily_matches
 
-    target = date.fromisoformat(sale_date)
+    target = _bj_today() if sale_date == "today" else date.fromisoformat(sale_date)
     n = await sync_daily_matches(db, target)
     return {"message": f"同步完成：{sale_date}，共 {n} 场", "count": n}

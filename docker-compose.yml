@@ -18,6 +18,7 @@ services:
     env_file:
       - .env
     environment:
+      - TZ=Asia/Shanghai
       - DATABASE_URL=postgresql+asyncpg://sporttery:${POSTGRES_PASSWORD:-sporttery}@postgres:5432/sporttery
       - REDIS_URL=redis://redis:6379/0
       - DUCKDB_PATH=/data/snapshots/sporttery.duckdb
@@ -45,6 +46,7 @@ services:
     env_file:
       - .env
     environment:
+      - TZ=Asia/Shanghai
       - DATABASE_URL=postgresql+asyncpg://sporttery:${POSTGRES_PASSWORD:-sporttery}@postgres:5432/sporttery
       - REDIS_URL=redis://redis:6379/0
       - DUCKDB_PATH=/data/snapshots/sporttery.duckdb
@@ -55,8 +57,6 @@ services:
       postgres:
         condition: service_healthy
       redis:
-        condition: service_healthy
-      backend:
         condition: service_healthy
     restart: unless-stopped
 

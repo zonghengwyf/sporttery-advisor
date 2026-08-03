@@ -4,8 +4,13 @@
 """
 import logging
 import math
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import Optional
+
+
+def _bj_today() -> date:
+    """返回北京时间当日日期。Docker 容器默认 UTC，直接用 date.today() 会差 8 小时。"""
+    return (datetime.utcnow() + timedelta(hours=8)).date()
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +50,7 @@ async def _get_snapshot_manager():
 
 async def run_daily_sync(sync_date: Optional[date] = None):
     """同步竞彩赛单 → PostgreSQL."""
-    target_date = sync_date or date.today()
+    target_date = sync_date or _bj_today()
     logger.info("开始同步赛单：%s", target_date)
 
     from db.session import AsyncSessionLocal
@@ -63,7 +68,7 @@ async def run_daily_sync(sync_date: Optional[date] = None):
 
 async def run_daily_analysis(analysis_date: Optional[date] = None):
     """运行今日完整分析流水线（三层：统计 → LLM → 票型）。"""
-    target_date = analysis_date or date.today()
+    target_date = analysis_date or _bj_today()
     logger.info("开始每日分析：%s", target_date)
 
     try:
@@ -86,7 +91,7 @@ async def run_daily_briefing():
         from datetime import date
         from db.models import Match, Prediction, DataSourceConfig
 
-        today = date.today()
+        today = _bj_today()
         matches_result = await session.execute(
             sa_select(Match).where(Match.sale_date == today).order_by(Match.kickoff_at)
         )
@@ -344,14 +349,13 @@ async def run_auto_ticket(
     自动出票：复用当日已有 Prediction，调用票型生成，写入 AutoTicketRun。
     返回新记录的 id。stake 为单用户预算，None 时回退 env 默认值。
     """
-    from datetime import date as _date
     from sqlalchemy import select as sa_select
     from db.models import AutoTicketRun, DataSourceConfig, LLMConfig, Match, Prediction
     from db.session import AsyncSessionLocal
     from config import get_settings
 
     settings = get_settings()
-    today = _date.today()
+    today = _bj_today()
 
     _own_db = db is None
     if _own_db:
@@ -361,8 +365,7 @@ async def run_auto_ticket(
         session = db
 
     try:
-        # 定时触发且未指定用户：读取 UI 设置页（DataSourceConfig）中所有启用
-        # 自动出票的用户，逐用户出票（每用户独立预算、当日幂等）
+        # 定时触发且未指定用户：读取所有启用自动出票的用户，逐用户出票（当日幂等）
         if user_id is None and trigger == "scheduled":
             cfg_result = await session.execute(
                 sa_select(DataSourceConfig).where(
@@ -612,6 +615,7 @@ async def _compute_recent_roi(session, user_id, limit: int = 5) -> float | None:
     """近 N 次已同步自动出票的平均 ROI，用于 Kelly 回撤保护。
     按 user_id 过滤（None 表示系统级出票），避免跨用户混淆。"""
     from sqlalchemy import select as sa_select
+    from db.models import AutoTicketRun
 
     user_filter = (
         AutoTicketRun.user_id.is_(None) if user_id is None
@@ -733,9 +737,8 @@ async def retrain_model(seasons: int = 3):
             return None
 
         from core.modeling.dixon_coles import MatchRecord, fit, apply_time_decay
-        from datetime import date as _date
 
-        today = _date.today()
+        today = _bj_today()
         records = []
         for m in historical:
             try:

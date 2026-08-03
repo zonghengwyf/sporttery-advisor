@@ -48,7 +48,7 @@ Use /browse from gstack for all web browsing. Never use mcp__claude-in-chrome__*
 - 需要测试覆盖 → `/test-driven-development`
 
 **🔍 质量保障**
-- 合并前代码审查 → `/review` + `/code-review-and-quality`（双轨审查）
+- 合并前代码审查 → `/review`
 - 安全 / 鉴权 / 输入校验 → `/security-and-hardening` / `/cso`
 - Bug 排查 → `/debugging-and-error-recovery` / `/investigate`
 - 性能问题 → `/performance-optimization`
@@ -366,8 +366,8 @@ When the user's request matches an available skill, **invoke it via the Skill to
 - 大段代码生成防截断 → invoke /full-output-enforcement
 
 ### 质量 / 调试
-- 代码审查 → invoke /review 或 /code-review-and-quality
-- 完整 review 流水线 → invoke /autoplan
+- 代码审查 → invoke /review
+- 完整 review 流水线 → invoke /autoplan（仅 PR 上线前）
 - Bug 排查 → invoke /investigate 或 /debugging-and-error-recovery
 - 安全审计 → invoke /cso 或 /security-and-hardening
 - 性能 → invoke /performance-optimization

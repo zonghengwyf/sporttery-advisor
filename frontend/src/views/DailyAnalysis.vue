@@ -37,6 +37,7 @@ const loading = ref(true)
 const syncing = ref(false)
 const selectMode = ref(false)
 const selectedIds = ref<number[]>([])
+const filterTab = ref<'all' | 'analyzed' | 'unanalyzed' | 'tournament'>('all')
 
 function localDate(offset = 0) {
   const d = new Date()
@@ -54,18 +55,39 @@ function formatGroupHeader(dateStr: string) {
   return `${days[d.getDay()]} · ${d.getMonth()+1}/${d.getDate()}`
 }
 
+const todayStats = computed(() => {
+  const analyzed = Object.keys(predictions.value).length
+  const tournaments = matches.value.filter(m => m.is_tournament).length
+  return { total: matches.value.length, analyzed, tournaments }
+})
+
+const filteredMatches = computed(() => {
+  switch (filterTab.value) {
+    case 'analyzed':   return matches.value.filter(m => !!predictions.value[m.id])
+    case 'unanalyzed': return matches.value.filter(m => !predictions.value[m.id])
+    case 'tournament': return matches.value.filter(m => m.is_tournament)
+    default:           return matches.value
+  }
+})
+
+const filterTabs = computed(() => {
+  const tabs: { key: string; label: string; count: number }[] = [
+    { key: 'all',        label: '全部',  count: matches.value.length },
+    { key: 'analyzed',   label: '已分析', count: todayStats.value.analyzed },
+    { key: 'unanalyzed', label: '待分析', count: matches.value.length - todayStats.value.analyzed },
+  ]
+  if (todayStats.value.tournaments > 0)
+    tabs.push({ key: 'tournament', label: '大赛', count: todayStats.value.tournaments })
+  return tabs
+})
+
 const groupedMatches = computed(() => {
   const groups: Record<string, Match[]> = {}
-  for (const m of matches.value) {
+  for (const m of filteredMatches.value) {
     if (!groups[m.sale_date]) groups[m.sale_date] = []
     groups[m.sale_date].push(m)
   }
   return Object.entries(groups).sort(([a], [b]) => a.localeCompare(b))
-})
-
-const todayStats = computed(() => {
-  const analyzed = Object.keys(predictions.value).length
-  return { total: matches.value.length, analyzed }
 })
 
 // 选场时隐藏 FAB，避免遮住生成方案按钮
@@ -101,7 +123,7 @@ function isSelected(id: number) {
 }
 
 function selectAll() {
-  selectedIds.value = matches.value.map(m => m.id)
+  selectedIds.value = filteredMatches.value.map(m => m.id)
 }
 
 function clearAll() {
@@ -166,8 +188,8 @@ function confidenceLabel(c: number | null) {
 
 function confidenceBadge(c: number | null) {
   if (c == null) return 'badge-gray'
-  if (c >= 0.7) return 'badge-red'
-  if (c >= 0.4) return 'badge-blue'
+  if (c >= 0.7) return 'badge-green'
+  if (c >= 0.4) return 'badge-gold'
   return 'badge-gray'
 }
 
@@ -253,15 +275,52 @@ onMounted(() => {
       </div>
     </Transition>
 
-    <!-- Loading -->
-    <div v-if="loading" class="fixture-list">
-      <div v-for="i in 4" :key="i" class="skeleton" style="height:90px" />
+    <!-- Filter tabs -->
+    <div v-if="!loading && matches.length > 0" class="filter-bar">
+      <button
+        v-for="f in filterTabs"
+        :key="f.key"
+        class="filter-chip"
+        :class="{ 'filter-chip--on': filterTab === f.key }"
+        @click="filterTab = (f.key as any)"
+      >
+        {{ f.label }}
+        <span class="filter-count">{{ f.count }}</span>
+      </button>
     </div>
 
-    <!-- Empty -->
+    <!-- Loading -->
+    <div v-if="loading" class="fixture-list">
+      <template v-for="i in 5" :key="i">
+        <div class="fx-skel">
+          <div class="fx-skel-left">
+            <div class="fx-skel-meta">
+              <div class="skeleton" style="width:42px;height:18px;border-radius:2px"/>
+              <div class="skeleton" style="width:80px;height:11px;border-radius:2px"/>
+            </div>
+            <div class="skeleton" style="width:90%;height:13px;border-radius:2px;margin-top:6px"/>
+            <div class="skeleton" style="width:70%;height:13px;border-radius:2px;margin-top:4px"/>
+            <div class="skeleton" style="width:40px;height:10px;border-radius:2px;margin-top:6px"/>
+          </div>
+          <div class="fx-skel-right">
+            <div class="skeleton" style="width:36px;height:17px;border-radius:2px"/>
+            <div class="skeleton" style="width:36px;height:17px;border-radius:2px"/>
+            <div class="skeleton" style="width:36px;height:17px;border-radius:2px"/>
+          </div>
+        </div>
+      </template>
+    </div>
+
+    <!-- Empty (no matches at all) -->
     <div v-else-if="!matches.length" class="empty-tip">
       <p class="empty-title">暂无赛事</p>
       <p class="text-sm text-muted mt-2">点击同步按钮拉取今日赛单</p>
+    </div>
+
+    <!-- Empty filtered state -->
+    <div v-else-if="filteredMatches.length === 0" class="empty-tip">
+      <p class="empty-title">无匹配赛事</p>
+      <p class="text-sm text-muted mt-2">切换筛选条件查看其他赛事</p>
     </div>
 
     <!-- Match list — B-style newspaper fixture rows -->
@@ -292,6 +351,7 @@ onMounted(() => {
             <div class="fx-meta">
               <span v-if="m.match_no" class="fx-no font-num">{{ m.match_no }}</span>
               <span class="fx-lg">{{ m.league }}</span>
+              <span v-if="m.is_tournament" class="badge badge-gold fx-tour-badge">大赛</span>
               <span v-if="predictions[m.id]" class="badge" :class="confidenceBadge(predictions[m.id].confidence)">{{ confidenceLabel(predictions[m.id].confidence) }}</span>
             </div>
             <div class="fx-teams">
@@ -683,4 +743,84 @@ onMounted(() => {
 
 .float-bar-enter-active, .float-bar-leave-active { transition: transform .12s ease-out, opacity .12s ease-out; }
 .float-bar-enter-from, .float-bar-leave-to { transform: translateY(100%); opacity: 0; }
+
+/* ── Filter bar ─────────────────────────────────────────────────────────── */
+.filter-bar {
+  display: flex;
+  gap: 6px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+  flex-shrink: 0;
+  scrollbar-width: none;
+  background: var(--card);
+}
+.filter-bar::-webkit-scrollbar { display: none; }
+
+.filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 20px;
+  border: 1px solid var(--line);
+  font-family: var(--font-disp);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .3px;
+  text-transform: uppercase;
+  color: var(--text3);
+  background: transparent;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all .12s ease;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+.filter-chip--on {
+  border-color: var(--primary);
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+}
+.filter-chip:not(.filter-chip--on):hover { border-color: var(--text2); color: var(--text2); }
+.filter-chip:active { transform: scale(0.95); }
+
+.filter-count {
+  font-family: var(--font-num);
+  font-size: 10px;
+  font-weight: 800;
+  background: color-mix(in srgb, currentColor 15%, transparent);
+  padding: 1px 5px;
+  border-radius: 10px;
+  line-height: 1.4;
+}
+
+/* ── Tournament badge tweak ─────────────────────────────────────────────── */
+.fx-tour-badge { font-size: 9px; padding: 1px 5px; }
+
+/* ── Fixture skeleton ────────────────────────────────────────────────────── */
+.fx-skel {
+  display: flex;
+  align-items: stretch;
+  min-height: 88px;
+  border-bottom: 1px solid var(--line);
+  background: var(--card);
+}
+.fx-skel-left {
+  flex: 1;
+  padding: 10px 12px 10px 14px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+.fx-skel-meta { display: flex; align-items: center; gap: 6px; margin-bottom: 2px; }
+.fx-skel-right {
+  border-left: 1px solid var(--line);
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 5px;
+  padding: 8px 14px;
+}
 </style>

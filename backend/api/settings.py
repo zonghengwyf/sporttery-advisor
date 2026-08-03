@@ -2,7 +2,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import get_current_user
@@ -526,5 +526,7 @@ async def upsert_auto_ticket_config(
             extra_config=extra,
         )
         db.add(cfg)
+    # NOTIFY 与数据变更在同一事务内，commit 后 worker 收到通知并热更新 cron
+    await db.execute(text("SELECT pg_notify('auto_ticket_changed', '')"))
     await db.commit()
     return extra
