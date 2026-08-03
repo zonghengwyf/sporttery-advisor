@@ -22,7 +22,7 @@
 │         └──────────────────┬┘──────────────────────┘            │
 │  ┌──────────────────────────▼────────────────────────────────┐  │
 │  │                     Data Layer                             │  │
-│  │  SportteryAPI → SportteryScraper → OddsAPI → APIFootball  │  │
+│  │  Sporttery 官方（在售+赛果接口，免 Key）→ The Odds API          │  │
 │  │  ClubElo (free) │ football-data.co.uk (free historical)   │  │
 │  └──────────────────────────────────────────────────────────┘  │
 │  ┌──────────────────────────────────────────────────────────┐   │
@@ -39,24 +39,33 @@
 
 ## 数据流
 
-### 每日同步流（08:00 APScheduler）
+### 赛单同步流（按需，GET /matches/ 触发）
 
 ```
-APScheduler.run_daily_sync()
+GET /matches/?sale_date=...
   │
   ├─ SourceManager.get_daily_matches(date)
-  │    ├─ [有 SportteryAPIKey] SportteryAPI.get_daily_matches()
-  │    └─ [无 Key] SportteryScraper.get_daily_matches() [Playwright]
+  │    └─ sporttery.get_daily_matches()  [竞彩官方在售接口，免 Key]
   │
   ├─ SourceManager.get_overseas_odds()
   │    └─ [有 OddsAPIKey] OddsAPI.get_odds_for_leagues()
   │
-  ├─ sync_daily_matches(session, source_manager, snapshot)
-  │    ├─ Upsert to PostgreSQL matches 表
-  │    └─ Save to DuckDB match_snapshots
+  ├─ Upsert to PostgreSQL matches 表
   │
   └─ Redis cache 写入 (matches:{date}, odds_api:latest)
 ```
+
+### 调度任务（APScheduler，worker 进程）
+
+| 任务 | 时间 | 说明 |
+|------|------|------|
+| run_daily_analysis | 09:00（daily_analyze_cron） | 三层分析流水线 |
+| run_daily_briefing | 08:30 | 早报 Webhook（配置后生效） |
+| sync_match_results | 每整点 | 赛果同步（批量 getMatchResultV1 → 在售接口 → The Odds API）+ 回测写入 + 注单结算 |
+| run_auto_ticket | DB 配置 cron（默认 09:30） | 自动出票，逐用户读 DataSourceConfig（开关/预算），当日幂等 |
+| sync_auto_ticket_results | DB 配置 sync_cron（默认 02:00） | 出票赛果同步 |
+
+> 赛单不设独立同步任务：`GET /matches/` 按需实时拉取竞彩在售接口并 upsert。
 
 ### 每日分析流（09:00 APScheduler，Phase 3）
 
@@ -85,11 +94,12 @@ APScheduler.run_daily_analysis()
        │    └─ 解析 LLM 输出 → intel_summary + risk_label + intel_adjustment
        │
        ├─ 4. Layer 3 — 票型生成
-       │    └─ TicketGenerator.generate(predictions, budget)
-       │         ├─ conservative: 60% 本金，高置信腿
-       │         ├─ balanced:     25% 本金，主观点+防守腿
-       │         ├─ high_odds:    10% 本金，含平局/冷门
-       │         └─ scoreline:    5%  本金，比分覆盖
+       │    └─ TicketGenerator.generate_parlay_plans(predictions, budget, recent_roi)
+       │         ├─ conservative / balanced / high_odds：N串1，Kelly 动态分配
+       │         │    （回撤保护：近 5 次 ROI < -30% 时 stake 减半）
+       │         ├─ *_cover：3~4 场全单选腿自动生成 M串N 容错方案
+       │         │    （3串4 / 4串11，2^n 枚举精确计算中奖率与等效赔率）
+       │         └─ scoreline：比分小注，独立 5% 预算，不走 Kelly
        │
        └─ 5. 写入 PostgreSQL predictions 表 + DuckDB prediction_snapshots
 ```
@@ -120,7 +130,9 @@ users: id, username, email, hashed_password, is_admin, created_at
 
 -- LLM 配置（每用户可配多个）
 llm_configs: id, user_id, name, provider(enum), model,
-             api_key(encrypted), base_url, is_default
+             api_key(encrypted), base_url, is_default,
+             status(ok|error|unknown), last_error, last_used_at,
+             total_calls, total_prompt_tokens, total_completion_tokens  -- 用量监控
 
 -- 数据源配置
 datasource_configs: id, user_id, source_name, api_key,
@@ -155,7 +167,8 @@ auto_ticket_runs: id, user_id→users, run_date, trigger(scheduled|manual),
 ```sql
 prediction_snapshots: id, match_id, run_id, observed_at, kickoff_at,
                       stat_probs(json), fused_probs(json), intel_summary,
-                      risk_label, confidence, model_version
+                      risk_label, confidence, model_version,
+                      market_odds(json)   -- 预测时刻赔率（CLV entry 价，ADR-006）
 
 match_snapshots: id, sporttery_id, observed_at, sale_date,
                  home_team, away_team, league, sporttery_odds(json),
@@ -188,6 +201,8 @@ backtest_results: id, match_id, user_id, p_home, p_draw, p_away,
 | POST | /api/settings/llm | 新增 LLM 配置 |
 | POST | /api/settings/llm/{id}/test | 测试连通 |
 | DELETE | /api/settings/llm/{id} | 删除配置 |
+| GET  | /api/settings/auto-ticket | 自动出票配置（enabled/cron/sync_cron/stake） |
+| PUT  | /api/settings/auto-ticket | 更新自动出票配置（DB 驱动，开关/预算即时生效） |
 | GET  | /api/settings/datasource | 数据源配置 |
 | PUT  | /api/settings/datasource | 更新数据源配置 |
 | POST | /api/bets/ | 创建投注记录 |
@@ -206,8 +221,8 @@ backtest_results: id, match_id, user_id, p_home, p_draw, p_away,
 
 | 场景 | 处理方式 |
 |------|---------|
-| 竞彩 API 返回空 | 自动降级 Playwright 爬虫，失败时返回空列表 |
-| Playwright 爬虫失效 | 返回 Redis 缓存（最长 4h），前端标注数据时效 |
+| 竞彩接口返回空/403 | 返回 Redis 缓存（最长 4h），前端标注数据时效 |
+| 赛果接口不可用 | 降级 The Odds API /scores → 人工录入（/api/backtest/record） |
 | LLM API 超时/错误 | 仅返回统计层结果，intel_summary 为 null |
 | Dixon-Coles 无训练数据 | 降级 `predict_from_features(elo, xg)` |
 | DuckDB 写失败 | 记录日志，不影响主流程 |

@@ -75,11 +75,11 @@ Use /browse from gstack for all web browsing. Never use mcp__claude-in-chrome__*
 
 **主要功能**：
 1. **今日分析** — 自动同步当日竞彩赛单，展示赔率和 AI 概率预测
-2. **投注方案** — 生成稳健票/均衡票/博高赔票/比分小注 + 资金分配
-3. **自动追踪** — 系统每日自动出票，赛后同步赛果，生成「推荐→赛果→盈亏」时间线
+2. **投注方案** — 稳健/均衡/博高赔 + M串N 容错方案（例如3串4等）+ 比分小注，Kelly 动态资金分配
+3. **自动追踪** — 系统每日自动出票（设置页 DB 配置驱动开关/预算/时间），赛后同步赛果，生成「推荐→赛果→盈亏」时间线
 4. **AI 对话** — 流式 SSE 追问式分析，注入 Skills 领域知识
 5. **回测报告** — Brier / Log-loss / RPS / ECE 精度指标，对标竞彩 SP 基线
-6. **系统设置** — LLM 多模型配置 + 数据源 API Key 管理
+6. **系统设置** — LLM 多模型配置（含状态/token 用量监控）+ 数据源 API Key 管理 + 自动出票配置
 
 **差异化**：
 - Skills 注入机制：将 `china-sporttery-football-advisor` 的竞彩决策规则（控分识别、激励分析、异常阵型等）注入 LLM system prompt，不依赖 Claude Code 运行时
@@ -98,7 +98,7 @@ Use /browse from gstack for all web browsing. Never use mcp__claude-in-chrome__*
 | 主数据库 | PostgreSQL（用户、配置、赛事） |
 | 缓存 | Redis |
 | 爬虫 | Playwright（无 API Key 时） |
-| 调度 | APScheduler（每日 08:00 同步，09:00 分析） |
+| 调度 | APScheduler（09:00 分析、整点赛果同步、定时自动出票，DB 配置驱动） |
 | 部署 | Docker Compose（5 services） |
 
 ## 目录结构
@@ -122,7 +122,8 @@ sporttery-advisor/
 │   │   └── settings.py                # LLM/数据源配置 CRUD
 │   ├── core/
 │   │   ├── llm/
-│   │   │   ├── client.py              # 多模型统一客户端
+│   │   │   ├── client.py              # 多模型统一客户端（含 token 用量捕获）
+│   │   │   ├── usage.py               # LLM 调用用量/状态回写
 │   │   │   └── skills_injector.py     # Skills Markdown 注入系统
 │   │   ├── modeling/
 │   │   │   ├── dixon_coles.py         # Dixon-Coles 拟合 + 预测
@@ -130,12 +131,12 @@ sporttery-advisor/
 │   │   │   ├── odds.py                # 去水差 + 价值评估
 │   │   │   ├── fusion.py              # 多源概率融合
 │   │   │   ├── factor_scorer.py       # 8因素置信度评分（来自 factor-model.md）
+│   │   │   ├── metrics.py             # 共享评估指标（RPS 等）
 │   │   │   └── model_registry.py      # Champion/Challenger 模型注册 + DuckDB 晋升门控
 │   │   ├── data/
 │   │   │   ├── providers/
-│   │   │   │   ├── sporttery_api.py   # 竞彩官方 API
-│   │   │   │   ├── sporttery_scraper.py # Playwright 爬虫降级
-│   │   │   │   ├── odds_api.py        # The Odds API 海外赔率
+│   │   │   │   ├── sporttery.py       # 竞彩官方接口（在售 getMatchCalculatorV1 + 赛果 getMatchResultV1，免 Key）
+│   │   │   │   ├── odds_api.py        # The Odds API 海外赔率/赛果降级
 │   │   │   │   ├── api_football.py    # 伤停/阵容
 │   │   │   │   ├── football_data.py   # 历史数据（免费）
 │   │   │   │   └── clubelo.py         # Elo 评分（免费）
@@ -143,7 +144,7 @@ sporttery-advisor/
 │   │   │   ├── snapshot.py            # DuckDB 快照管理
 │   │   │   └── sync.py                # 赛单同步编排
 │   │   ├── tickets/
-│   │   │   ├── generator.py           # 票型生成器（Phase 3 完善）
+│   │   │   ├── generator.py           # 票型生成器（Kelly 分配 + M串N 容错）
 │   │   │   └── hhad.py                # 让球盘（HHAD）概率转换：HAD + 让球数 → 三结果分布
 │   │   └── pipeline.py                # 每日端到端流水线（Phase 3）
 │   ├── skills/                         # Skills Markdown 文件（注入 LLM）
@@ -171,7 +172,7 @@ sporttery-advisor/
 │   │   │   ├── Login.vue              # 登录页
 │   │   │   ├── DailyAnalysis.vue      # 今日赛事列表
 │   │   │   ├── MatchDetail.vue        # 单场详情 + 概率图
-│   │   │   ├── BettingTickets.vue     # 投注方案 4 票型
+│   │   │   ├── BettingTickets.vue     # 投注方案（动态 tab，含 M串N 容错）
 │   │   │   ├── BetRecord.vue          # 自动出票追踪 + 赛果时间线（追踪页）
 │   │   │   ├── BacktestReport.vue     # 回测精度报告
 │   │   │   ├── ChatAnalysis.vue       # AI 流式对话
@@ -193,7 +194,8 @@ sporttery-advisor/
         ├── ADR-002-duckdb-postgres-split.md
         ├── ADR-003-llm-openai-compat.md
         ├── ADR-004-data-source-fallback.md
-        └── ADR-005-model-registry-champion-challenger.md
+        ├── ADR-005-model-registry-champion-challenger.md
+        └── ADR-006-clv-tracking-and-rps-gate.md
 ```
 
 ## 当前进度
@@ -249,8 +251,8 @@ sporttery-advisor/
 
 ### ⏳ Phase 6 — 生产化（待）
 - 完整 JWT 多用户流程
-- APScheduler 每日自动调度
 - Docker 完整打包 + 部署文档
+- ~~APScheduler 每日自动调度~~（已完成：09:00 分析 / 整点赛果同步 / 定时自动出票）
 
 ## 关键设计决策
 
@@ -265,7 +267,19 @@ sporttery-advisor/
 所有中国模型（DeepSeek / Kimi / GLM）均暴露 OpenAI 兼容 API。统一用 `base_url + api_key` 通过 openai SDK 调用。三方中转站同理。
 
 ### 数据源降级
-SourceManager 优先级：`竞彩 API Key → Playwright 爬虫 → Redis 缓存 → 免费源（ClubElo / football-data.co.uk）`
+赛果降级链：竞彩赛果接口（getMatchResultV1，批量）→ 竞彩在售接口（当天完赛）→ The Odds API /scores → 人工录入（/api/backtest/record）。情报源：ClubElo / football-data.co.uk 等免费源。
+
+### 时区约定（重要）
+`Match.kickoff_at` 存**北京时间 naive datetime**。任何与当前时间的比较必须用 `datetime.utcnow() + timedelta(hours=8)`，直接用 `utcnow()` 会晚 8 小时（曾导致赛果同步/出票同步失效）。
+
+### 自动出票配置（DB 驱动）
+开关/预算/时间存 `DataSourceConfig`（`source_name="auto_ticket"`，UI 设置页维护），scheduler 始终注册任务、每轮读 DB 逐用户执行（当日幂等）；cron 启动时优先取 DB。env 的 `AUTO_TICKET_*` 仅为兼底默认，`AUTO_TICKET_ENABLED` 已废弃。
+
+### M串N 容错方案
+3~4 场全单选腿时自动生成容错方案（3串4 / 4串11，全部 2串1~n串1 子组合），`combo_sizes` 字段标识；中奖概率/等效赔率用 2^n 枚举精确计算；结算（`_compute_run_roi` / `track._serialize_run`）按中奖子组合独立派奖。多选腿不做容错（注数爆炸、无官方命名）。
+
+### LLM 状态与用量
+`LLMConfig` 记录 status/last_error/last_used_at/累计调用与 token；`client.chat()` 捕获 API usage，`record_llm_usage` 异步回写（不阻断主流程）；设置页展示。API 不提供真实余额查询，展示的是累计 token 消耗。
 
 ### 市场角色分离
 - REFERENCE：用于生成先验概率（海外盘口）

@@ -6,11 +6,11 @@
 
 - **今日分析** — 自动同步当日竞彩赛单，展示赔率快照与 AI 风险标签
 - **单场详情** — Dixon-Coles 概率条图、赔率价值对比、情报摘要、一键 AI 分析
-- **投注方案** — 稳健票 / 均衡票 / 博高赔票 / 比分小注 + 自动资金分配
+- **投注方案** — 稳健 / 均衡 / 博高赔 + M串N 容错方案（3串4/4串11，错 1~2 场仍有奖）+ 比分小注，Kelly 动态资金分配（含回撤保护）
 - **自动追踪** — 系统每日自动出票，赛后同步赛果，生成可回溯的「推荐→赛果→盈亏」时间线
 - **AI 对话** — SSE 流式追问式分析，注入竞彩 Skills 领域知识
 - **回测报告** — Brier / Log-loss / RPS / ECE 精度指标，对标竞彩 SP 基线
-- **系统设置** — 多 LLM 模型配置 + 数据源 API Key 管理
+- **系统设置** — 多 LLM 模型配置（含状态 / token 用量监控）+ 数据源 Key 管理 + 自动出票配置
 
 ## 技术栈
 
@@ -24,7 +24,7 @@
 | 主数据库 | PostgreSQL |
 | 缓存 | Redis |
 | 爬虫 | Playwright（无 API Key 时降级） |
-| 调度 | APScheduler（每日 08:00 同步，09:00 分析） |
+| 调度 | APScheduler（09:00 分析、整点赛果同步、定时自动出票；出票开关/预算/时间由设置页 DB 配置驱动） |
 | 部署 | Docker Compose（5 个服务） |
 
 ## 快速开始
@@ -131,19 +131,22 @@ sporttery-advisor/
 │   │   └── settings.py     # LLM / 数据源配置
 │   ├── core/
 │   │   ├── llm/
-│   │   │   ├── client.py           # 多模型统一客户端
+│   │   │   ├── client.py           # 多模型统一客户端（含 token 用量捕获）
+│   │   │   ├── usage.py            # LLM 调用用量/状态回写
 │   │   │   └── skills_injector.py  # Skills 注入系统
 │   │   ├── modeling/
 │   │   │   ├── dixon_coles.py      # Dixon-Coles 模型
 │   │   │   ├── calibration.py      # 温度校准
 │   │   │   ├── odds.py             # 去水差 + 价值评估
-│   │   │   └── fusion.py           # 多源概率融合
+│   │   │   ├── fusion.py           # 多源概率融合
+│   │   │   ├── metrics.py          # 共享评估指标（RPS 等）
+│   │   │   └── model_registry.py   # Champion/Challenger 晋升门控
 │   │   ├── data/
 │   │   │   ├── providers/          # 6 个数据提供者
 │   │   │   ├── source_manager.py   # 降级链 + Redis 缓存
 │   │   │   └── sync.py             # 赛单同步编排
 │   │   ├── tickets/
-│   │   │   └── generator.py        # 4 类票型 + 资金分配
+│   │   │   └── generator.py        # 票型生成 + Kelly 分配 + M串N 容错
 │   │   └── pipeline.py             # 端到端分析流水线
 │   ├── skills/                     # Skills Markdown 文件
 │   ├── db/
@@ -157,7 +160,7 @@ sporttery-advisor/
 │       ├── views/
 │       │   ├── DailyAnalysis.vue   # 今日赛事列表
 │       │   ├── MatchDetail.vue     # 单场详情 + 概率图
-│       │   ├── BettingTickets.vue  # 投注方案 4 票型
+│       │   ├── BettingTickets.vue  # 投注方案（动态 tab，含 M串N 容错）
 │       │   ├── BetRecord.vue       # 自动出票追踪 + 赛果时间线
 │       │   ├── BacktestReport.vue  # 回测精度报告
 │       │   ├── ChatAnalysis.vue    # AI 流式对话
@@ -191,7 +194,7 @@ Data-Dense Dashboard 风格，适配深色侧边栏 + 浅色内容区。
 | Phase 3 | 核心分析层：LLM 情报 + Skills 条件激活 + 票型生成 | ✅ 完成 |
 | Phase 4 | 前端完整功能：概率图表 + 投注方案联调 + 分析状态徽章 | ✅ 完成 |
 | Phase 5 | 自动出票追踪：BetRecord 页面 + 赛果同步 + 准确率统计 | ✅ 完成 |
-| Phase 6 | 生产化：完整多用户 JWT + 自动调度 + Docker 完整部署文档 | ⏳ 待 |
+| Phase 6 | 生产化：完整多用户 JWT + Docker 完整部署文档（自动调度已完成：分析/赛果同步/自动出票） | ⏳ 待 |
 
 ## 致谢
 
