@@ -1,23 +1,26 @@
 # 竞彩足球投注顾问 — 项目上下文
 
-## gstack
+## 工具链
 
-Use /browse from gstack for all web browsing. Never use mcp__claude-in-chrome__* tools.
+### 全部可用 Skills
 
-### 全部可用 skills
+**spec-kit（SDD 流程框架）：**
+/speckit-constitution, /speckit-specify, /speckit-plan, /speckit-tasks,
+/speckit-implement, /speckit-converge, /speckit-clarify, /speckit-analyze,
+/speckit-checklist, /speckit-taskstoissues
 
-**gstack 原生：**
-/office-hours, /plan-ceo-review, /plan-eng-review, /plan-design-review,
-/design-consultation, /design-shotgun, /design-html, /review, /ship, /land-and-deploy,
-/canary, /benchmark, /browse, /open-gstack-browser, /qa, /qa-only, /design-review,
-/setup-browser-cookies, /setup-deploy, /setup-gbrain, /sync-gbrain, /retro, /investigate,
-/document-release, /document-generate, /codex, /cso, /autoplan, /pair-agent, /careful,
-/freeze, /guard, /unfreeze, /gstack-upgrade, /learn, /spec, /diagram, /make-pdf,
-/context-save, /context-restore, /plan-tune
+**mattpocock/skills（工程基本功）：**
+/grill-me, /grill-with-docs, /ask-matt, /to-spec, /to-tickets, /implement,
+/triage, /wayfinder, /improve-codebase-architecture, /code-review,
+/diagnosing-bugs, /tdd, /handoff, /prototype, /research, /domain-modeling,
+/codebase-design, /resolving-merge-conflicts
 
-**agent-skills（扩展包）：**
-/ui-ux-pro-max, /design-taste-frontend, /high-end-visual-design, /frontend-ui-engineering,
-/design-system, /ui-styling, /image-to-code,
+**ui-ux-pro-max-skill plugin（nextlevelbuilder/ui-ux-pro-max-skill）：**
+/ui-ux-pro-max
+
+**agent-skills（UI/设计 + 工程扩展）：**
+/design-taste-frontend, /high-end-visual-design, /frontend-ui-engineering,
+/image-to-code,
 /planning-and-task-breakdown, /incremental-implementation, /full-output-enforcement,
 /source-driven-development, /spec-driven-development, /doubt-driven-development,
 /test-driven-development, /debugging-and-error-recovery, /code-review-and-quality,
@@ -32,38 +35,43 @@ Use /browse from gstack for all web browsing. Never use mcp__claude-in-chrome__*
 - 任何 UI 改动开始前 → `/ui-ux-pro-max`（定方向：风格 + 调色板 + 字体组合）
 - 组件/页面重设计 → `/design-taste-frontend`（Anti-slop 实现，防 AI 默认美学）
 - 高端科技感效果 → `/high-end-visual-design`（Barlow + 数据密集型仪表盘）
-- 多方案对比 → `/design-shotgun`（生成 3 个方向，结构化反馈后收敛）
 - Vue 组件落地 → `/frontend-ui-engineering`（可访问性、响应式、生产级）
 
 **📋 功能规划**
-- 新功能/产品讨论 → `/office-hours` → `/idea-refine` → `/spec`
-- 任务拆分 → `/planning-and-task-breakdown`
+- 新功能/产品讨论 → `/grill-me`（追问式需求对齐）或 `/grill-with-docs`（同时建立领域词汇）
+- SDD 流程：`/speckit-specify` → `/speckit-plan` → `/speckit-tasks` → `/speckit-implement`
+- 任务拆分 → `/speckit-tasks` / `/to-tickets`（存 .scratch/）
 - API 接口设计 → `/api-and-interface-design`
-- 架构评审 → `/plan-eng-review`
+- 架构评审 → `/grill-with-docs`（架构专项追问）
+- 大型跨会话工作 → `/wayfinder`
 
 **⚙️ 编码**
 - 多文件改动 → `/incremental-implementation`（逐步落地，防大爆炸）
+- 规范执行 spec → `/implement`（mattpocock，驱动 /tdd + /code-review）
 - 复杂逻辑/LLM 调用 → `/doubt-driven-development`（对抗性自审）
 - 参考官方文档 → `/source-driven-development`（Vue 3 / FastAPI / SQLAlchemy）
-- 需要测试覆盖 → `/test-driven-development`
+- 需要测试覆盖 → `/tdd`（red-green-refactor）/ `/test-driven-development`
 
 **🔍 质量保障**
-- 合并前代码审查 → `/review`
-- 安全 / 鉴权 / 输入校验 → `/security-and-hardening` / `/cso`
-- Bug 排查 → `/debugging-and-error-recovery` / `/investigate`
+- 合并前代码审查 → `/code-review`（Standards + Spec 双轴）
+- 安全 / 鉴权 / 输入校验 → `/security-and-hardening`
+- Bug 排查 → `/diagnosing-bugs`（reproduce→minimize→fix→regress）/ `/debugging-and-error-recovery`
 - 性能问题 → `/performance-optimization`
 - 日志 / 告警 → `/observability-and-instrumentation`
 - 防输出截断 → `/full-output-enforcement`（大文件生成时前置）
+- 一致性检查 → `/speckit-analyze`（spec/plan/tasks 三者对齐）
+- 架构健康 → `/improve-codebase-architecture`（建议每数日扫一次）
 
 **🚀 交付**
-- 功能验收 → `/qa http://localhost:5173`
+- 功能验收 → 手动在浏览器访问 http://localhost:5173 验收（无自动化 QA）
 - 发布准备 → `/shipping-and-launch`（checklist + rollback）
-- 合并 / PR → `/ship`
-- 文档 → `/document-release`
+- 合并 / PR → `git push` + GitHub 网页创建 PR（`gh` CLI 未安装）
+- 规格收敛检查 → `/speckit-converge`（对比实现与 spec，补充遗漏任务）
 
 **🗂️ 上下文管理**
-- 会话快照 → `/context-save` / `/context-restore`
+- 会话交接 → `/handoff`（压缩当前会话为交接文档）
 - 切换任务前 → `/context-engineering`（重置上下文，提升质量）
+- 领域词汇表 → 维护 `CONTEXT.md`（`/domain-modeling` / `/grill-with-docs` 更新）
 
 ## 项目概述
 
@@ -183,9 +191,9 @@ sporttery-advisor/
 │   │   └── tailwind.config.js         # 全量设计 token
 │   └── vite.config.ts                 # Vite + /api 反向代理
 ├── docker-compose.yml                 # 5 services: frontend/backend/worker/postgres/redis
-├── DESIGN.md                          # 产品设计文档（/office-hours 输出）
+├── DESIGN.md                          # 产品设计文档（/grill-me 输出）
 └── docs/
-    ├── ARCHITECTURE.md                # 技术架构文档（/plan-eng-review 输出）
+    ├── ARCHITECTURE.md                # 技术架构文档（/grill-with-docs 输出）
     ├── AUTO_TRACK_DESIGN.md           # 自动追踪功能设计（数据模型 + 菜单决策）
     ├── TRACK_PAGE_REQUIREMENTS.md     # 追踪页面详细需求（2026-07-31）
     └── adr/                           # Architecture Decision Records
@@ -252,7 +260,7 @@ sporttery-advisor/
 ### ⏳ Phase 6 — 生产化（待）
 - 完整 JWT 多用户流程
 - Docker 完整打包 + 部署文档
-- ~~APScheduler 每日自动调度~~（已完成：09:00 分析 / 整点赛果同步 / 定时自动出票）
+- APScheduler 每日自动调度（✅ 已完成：09:00 分析 / 整点赛果同步 / 定时自动出票）
 
 ## 关键设计决策
 
@@ -314,6 +322,7 @@ sporttery-advisor/
 - Phase 2 验证：`POST /matches/sync` → `/api/matches/` 返回今日赛单
 - Phase 3 验证：`/api/predict/{match_id}` 返回完整 JSON（概率 + 情报 + 风险标签）
 - Phase 4 验证：前端投注方案页显示 4 类票型，AI 对话流式回答
+- Phase 5 验证：BetRecord 页展示历史出票记录 + 赛果时间线，`/api/track` 赛果同步正常
 
 ## 环境变量（.env）
 
@@ -332,10 +341,10 @@ API_FOOTBALL_KEY=
 
 ## 参考资料
 
-本项目整合两个现有项目：
+本项目整合以下现有项目：
 - `../china-sporttery-football-advisor/` — 竞彩决策规则 Skills（SKILL.md 等 5 个文件）
 - `../football-prediction-skill/` — Dixon-Coles 统计模型参考实现
-- `../sports-skills/`
+- `../sports-skills/` — 通用体育分析技能库
 
 ## Skill routing
 
@@ -344,42 +353,49 @@ When the user's request matches an available skill, **invoke it via the Skill to
 ### UI / 视觉设计
 - 任何 UI 改动、重设计、科技感升级 → invoke /ui-ux-pro-max 确定方向，再 invoke /design-taste-frontend 实现
 - 高端视觉效果、仪表盘美化 → invoke /high-end-visual-design
-- 需要多方案对比 → invoke /design-shotgun
 - Vue 组件生产级实现 → invoke /frontend-ui-engineering
-- HTML 原型 → invoke /design-html
-- 设计系统 / Token → invoke /design-system
+- 设计系统 / Token → invoke /ui-ux-pro-max:design-system
 
 ### 需求 / 规划
-- 产品讨论、头脑风暴 → invoke /office-hours
-- 想法细化 → invoke /idea-refine
-- 写 spec / 需求文档 → invoke /spec
-- 任务拆分 → invoke /planning-and-task-breakdown
+- 产品讨论、头脑风暴 → invoke /grill-me
+- 想法细化 + 建立领域词汇 → invoke /grill-with-docs
+- SDD 流程起点 → invoke /speckit-specify
+- 任务拆分 → invoke /speckit-tasks 或 /to-tickets
 - API / 接口设计 → invoke /api-and-interface-design
-- 架构评审 → invoke /plan-eng-review
-- 策略评审 → invoke /plan-ceo-review
+- 架构评审 → invoke /grill-with-docs
+- 大型跨会话规划 → invoke /wayfinder
 
 ### 编码
 - 多文件改动 → invoke /incremental-implementation
+- 按 spec 规范实现 → invoke /implement
 - 高风险 / 复杂逻辑 → invoke /doubt-driven-development
 - 需参考文档 → invoke /source-driven-development
-- 需要测试 → invoke /test-driven-development
+- 需要测试 → invoke /tdd 或 /test-driven-development
 - 大段代码生成防截断 → invoke /full-output-enforcement
 
 ### 质量 / 调试
-- 代码审查 → invoke /review
-- 完整 review 流水线 → invoke /autoplan（仅 PR 上线前）
-- Bug 排查 → invoke /investigate 或 /debugging-and-error-recovery
-- 安全审计 → invoke /cso 或 /security-and-hardening
+- 代码审查 → invoke /code-review
+- Bug 排查 → invoke /diagnosing-bugs 或 /debugging-and-error-recovery
+- 安全审计 → invoke /security-and-hardening
 - 性能 → invoke /performance-optimization
 - 日志 / 监控 → invoke /observability-and-instrumentation
-- QA 验收 → invoke /qa http://localhost:5173
+- spec 一致性检查 → invoke /speckit-analyze
 
 ### 交付
-- Ship / PR → invoke /ship 或 /land-and-deploy
+- 收敛检查 → invoke /speckit-converge
 - 发布检查 → invoke /shipping-and-launch
-- 文档 → invoke /document-release
+- 架构健康扫描 → invoke /improve-codebase-architecture
 
 ### 上下文
-- 保存进度 → invoke /context-save
-- 恢复上下文 → invoke /context-restore
+- 会话交接 → invoke /handoff
 - 任务切换前清理 → invoke /context-engineering
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specs live as local markdown files under `.scratch/<feature-slug>/`. See `docs/agents/issue-tracker.md`.
+
+### Domain docs
+
+Single-context — `CONTEXT.md` at the repo root + `docs/adr/`. See `docs/agents/domain.md`.
