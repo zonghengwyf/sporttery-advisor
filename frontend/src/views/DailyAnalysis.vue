@@ -3,6 +3,7 @@ import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import api from '@/api'
 import { useChatStore } from '@/stores/chat'
+import InfoTip from '@/components/InfoTip.vue'
 
 const router = useRouter()
 const route = useRoute()
@@ -269,7 +270,9 @@ onMounted(() => {
         <span class="stats-sep">·</span>
         <span class="stats-bar-item">
           <span class="stats-num text-green font-num">{{ todayStats.analyzed }}</span>
-          <span class="stats-unit">已分析</span>
+          <span class="stats-unit">已分析
+            <InfoTip text="AI分析完成后，赛事卡会显示置信度徽章：高置信≥70%（绿）、中置信40-70%（橙）、低置信＜40%（灰）。数值代表AI对推荐结果的综合把握程度。" />
+          </span>
         </span>
         <span v-if="todayStats.analyzed === 0 && todayStats.total > 0" class="stats-hint">点赛事卡可触发分析</span>
       </div>

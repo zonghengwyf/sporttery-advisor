@@ -6,6 +6,7 @@ import { GridComponent, TooltipComponent, LegendComponent } from 'echarts/compon
 import { CanvasRenderer } from 'echarts/renderers'
 import VChart from 'vue-echarts'
 import api from '@/api'
+import InfoTip from '@/components/InfoTip.vue'
 
 use([LineChart, GridComponent, TooltipComponent, LegendComponent, CanvasRenderer])
 
@@ -144,11 +145,15 @@ const chartOption = computed(() => ({
   ],
 }))
 
-const METRIC_DEFS: { key: MetricKey; label: string; desc: string }[] = [
-  { key: 'brier',    label: 'Brier 分',  desc: '越低越好，< 0.2 优秀' },
-  { key: 'log_loss', label: '对数损失',  desc: '越低越好，< 0.5 良好' },
-  { key: 'rps',      label: 'RPS',       desc: '等级概率分，越低越好' },
-  { key: 'ece',      label: 'ECE',       desc: '校准误差，越低越好' },
+const METRIC_DEFS: { key: MetricKey; label: string; desc: string; tip: string }[] = [
+  { key: 'brier',    label: 'Brier 分',  desc: '越低越好，< 0.2 优秀',
+    tip: '预测概率准确度（0~1，越低越好）。Brier=0 完美，0.333 等同随机猜测，<0.2 为优秀水平。衡量"预测的概率是否靠近真实结果"。' },
+  { key: 'log_loss', label: '对数损失',  desc: '越低越好，< 0.5 良好',
+    tip: '对高置信错误判断惩罚更重的指标。如果模型以90%置信度预测错误，惩罚远高于50%置信度错误。<0.5 为良好水平。' },
+  { key: 'rps',      label: 'RPS',       desc: '等级概率分，越低越好',
+    tip: '等级概率分，专为胜平负三结果设计。同时评估主胜/平局/客胜三向概率的整体质量，比Brier更适合竞彩场景。越低越好。' },
+  { key: 'ece',      label: 'ECE',       desc: '校准误差，越低越好',
+    tip: '期望校准误差：检验"预测60%胜率时，实际胜率是否真的≈60%"。越低说明概率越可信，注额按概率分配的依据越扎实。' },
 ]
 
 onMounted(load)
@@ -175,7 +180,7 @@ onMounted(load)
           :key="def.key"
           class="metric-card card no-accent p-4"
         >
-          <div class="section-label" style="margin-bottom:4px">{{ def.label }}</div>
+          <div class="section-label" style="margin-bottom:4px">{{ def.label }} <InfoTip :text="def.tip" /></div>
           <div
             class="stat-val"
             :class="metricClass(def.key, metrics ? metrics[def.key] : null)"

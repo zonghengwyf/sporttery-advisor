@@ -210,16 +210,17 @@ async def _get_user_llm_client(session: AsyncSession, user_id: int):
     cfg = await _get_user_llm_config(session, user_id)
     if not cfg:
         return None
-    return LLMClient(ClientLLMConfig(
+    client = LLMClient(ClientLLMConfig(
         provider=cfg.provider.value,
         model=cfg.model,
         api_key=cfg.api_key,
         base_url=cfg.base_url,
     ))
+    client.db_config_id = cfg.id  # 用于用量/状态回写
+    return client
 
 
-async def _run_analysis_background(match_id: int, llm_cfg, user_id: int):
-    """后台任务：完成分析后写入 DB。"""
+async def _run_analysis_background(match_id: int, llm_cfg: DBLLMConfig, user_id: int) -> None:
     from core.llm.client import LLMClient
     from core.llm.client import LLMConfig as ClientLLMConfig
     from core.pipeline import DailyPipeline
@@ -237,6 +238,7 @@ async def _run_analysis_background(match_id: int, llm_cfg, user_id: int):
             api_key=llm_cfg.api_key,
             base_url=llm_cfg.base_url,
         ))
+        llm_client.db_config_id = llm_cfg.id  # 用于用量/状态回写
         pipeline = DailyPipeline()
         ar = await pipeline.analyze_single_match(session, match, llm_client)
         pred = Prediction(

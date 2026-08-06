@@ -14,6 +14,11 @@ import logging
 import math
 from dataclasses import dataclass, field
 from datetime import datetime
+from itertools import combinations
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from core.tickets.global_decision import TicketStructureDirective
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +32,9 @@ _RISK_WEIGHT = {
     "upset_cover": 0.4,
     "avoid":       0.15,  # 参与博高赔腿，不参与稳健/均衡
 }
+
+# HHAD 必须比 HAD EV 高出此幅度才切换（防止模型误差导致全量让球）
+_HHAD_PREFERENCE_MARGIN = 0.05
 
 
 @dataclass
@@ -131,6 +139,8 @@ class ParlayPlan:
     # M串N 容错方案时的子组合串级（如 [2,3,4] 表示全部 2串1/3串1/4串1 子组合）；
     # None 或 [n] 表示普通 n串1
     combo_sizes: list[int] | None = None
+    ai_rationale: str = ""                                    # AI 全局决策给出的方案结构说明
+    ai_excluded: list[dict] = field(default_factory=list)     # 被排除场次 [{match_id, home_team, away_team, reason}]
 
     def to_dict(self) -> dict:
         return {
@@ -150,6 +160,8 @@ class ParlayPlan:
             "theoretical_prize": round(self.theoretical_prize, 1),
             "win_probability":   round(self.win_probability, 4),
             "win_probability_pct": f"{self.win_probability * 100:.1f}%",
+            "ai_rationale":      self.ai_rationale,
+            "ai_excluded":       self.ai_excluded,
         }
 
 
@@ -275,17 +287,24 @@ class TicketGenerator:
         budget: float = 100.0,
         multiplier: int = 1,
         recent_roi: float | None = None,
+        directive: "TicketStructureDirective | None" = None,
     ) -> list[ParlayPlan]:
-        """
-        enriched_predictions: 每项包含
-          {
-            "match": db.Match 对象,
-            "prediction": db.Prediction 对象,
-            "ensemble_votes": list[dict] (可选),
-          }
-        返回最多 4 个方案（稳健/均衡/博高赔/比分）。
-        多选腿：LLM 返回 "主胜/平" 或 picks=["客胜","平"] 时保留全部选项。
-        """
+        """生成稳健/均衡/博高赔/比分 4 类方案；directive 非 None 时由 AI 决定场次组合，否则降级 Python 规则。"""
+        # 当 AI 判断今日无推荐方案时提前返回
+        if directive is not None and directive.no_recommendation:
+            logger.info("generate_parlay_plans：AI 全局决策判断今日无推荐方案，跳过生成")
+            return []
+
+        # directive 提供时：各 ids 为 set（空 set 代表 AI 决定该方案不含任何场次）
+        # directive 为 None 时：各 ids 为 None（降级使用 _RISK_WEIGHT 阈值）
+        cons_ids: set[int] | None = None
+        bal_ids: set[int] | None = None
+        ho_ids: set[int] | None = None
+        if directive is not None:
+            cons_ids = set(directive.conservative.match_ids) if directive.conservative else set()
+            bal_ids  = set(directive.balanced.match_ids)    if directive.balanced    else set()
+            ho_ids   = set(directive.high_odds.match_ids)   if directive.high_odds   else set()
+
         conservative_legs: list[ParlayLeg] = []
         balanced_legs: list[ParlayLeg] = []
         high_odds_legs: list[ParlayLeg] = []
@@ -317,7 +336,7 @@ class TicketGenerator:
             match_code = _extract_match_code(match)
 
             # ── _make_leg：解析 LLM pick（含多选），构建 ParlayLeg ─────────────
-            def _make_leg(pick_dict, pick_override: str | None = None) -> ParlayLeg | None:
+            def _make_leg(pick_dict, pick_override: str | None = None, max_picks: int = 99) -> ParlayLeg | None:
                 if not pick_dict and not pick_override:
                     return None
 
@@ -348,6 +367,9 @@ class TicketGenerator:
 
                 if not normalized:
                     return None
+
+                # 防止多选对冲导致注数膨胀和方向不明
+                normalized = normalized[:max_picks]
 
                 # 以第一个（主要）选项决定市场
                 primary_pick_name = normalized[0]
@@ -437,24 +459,29 @@ class TicketGenerator:
                     num_picks=len(picks_list),
                 )
 
+            match_id_int = int(mid) if str(mid).isdigit() else -1
             logger.info(
                 "match_id=%s risk=%s weight=%.1f conservative_leg=%s",
                 mid, risk, weight, tickets.get("conservative_leg"),
             )
 
-            if weight >= 0.7:
-                leg = _make_leg(tickets.get("conservative_leg"))
+            use_cons = match_id_int in cons_ids if cons_ids is not None else weight >= 0.7
+            use_bal  = match_id_int in bal_ids  if bal_ids  is not None else weight >= 0.4
+            use_ho   = match_id_int in ho_ids   if ho_ids   is not None else True
+
+            if use_cons:
+                leg = _make_leg(tickets.get("conservative_leg"), max_picks=1)
                 if leg:
                     conservative_legs.append(leg)
 
-            if weight >= 0.4:
-                leg = _make_leg(tickets.get("balanced_leg"))
+            if use_bal:
+                leg = _make_leg(tickets.get("balanced_leg"), max_picks=1)
                 if leg:
                     balanced_legs.append(leg)
 
             ho = tickets.get("high_odds_leg")
-            if ho:
-                leg = _make_leg(ho)
+            if ho and use_ho:
+                leg = _make_leg(ho, max_picks=1)
                 if leg:
                     high_odds_legs.append(leg)
 
@@ -471,6 +498,22 @@ class TicketGenerator:
 
         base_stake = 2.0
 
+        # 构建 directive 的排除列表（供所有方案共享）
+        excluded_list: list[dict] = []
+        if directive is not None:
+            for ex in directive.excluded:
+                # 尝试从 enriched_predictions 中找到队名
+                info = next(
+                    ({"match_id": ex.match_id,
+                      "home_team": item["match"].home_team,
+                      "away_team": item["match"].away_team,
+                      "reason": ex.reason}
+                     for item in enriched_predictions
+                     if item["match"].id == ex.match_id),
+                    {"match_id": ex.match_id, "reason": ex.reason},
+                )
+                excluded_list.append(info)
+
         plans: list[ParlayPlan] = []
         for plan_id, name, legs in [
             ("conservative", "稳健串关", conservative_legs),
@@ -482,25 +525,54 @@ class TicketGenerator:
                     logger.info("plan=%s 仅 %d 腿，不足 2 场，跳过", plan_id, len(legs))
                 continue
             plan = _build_plan(plan_id, name, legs, base_stake, multiplier, budget)
+
+            scheme_dir = _get_scheme_dir(directive, plan_id)
+            if scheme_dir and scheme_dir.rationale:
+                plan.ai_rationale = scheme_dir.rationale
+            plan.ai_excluded = excluded_list
+
             plans.append(plan)
-            # 3~4 场且全单选腿：追加 M串N 容错方案（全部 2串1~n串1 子组合，
-            # 错 1~(n-2) 场仍有奖）。多选腿注数会爆炸、竞彩无对应官方命名，不做容错。
+
             n = len(legs)
-            if 3 <= n <= 4 and all(l.num_picks == 1 for l in legs):
+            if directive is not None:
+                should_cover = bool(scheme_dir and scheme_dir.cover is not None)
+            else:
+                should_cover = 3 <= n <= 4 and all(l.num_picks == 1 for l in legs)
+
+            if should_cover and all(l.num_picks == 1 for l in legs):
+                combo_sizes = list(range(2, n + 1))
+                # 官网拒单上限 5 注（SC-001），无论 AI 指令还是 Python 规则路径均强制截断
+                trial_combos = sum(
+                    sum(1 for _ in combinations(range(n), k)) for k in combo_sizes
+                )
+                if trial_combos > 5:
+                    logger.warning("plan=%s 容错注数 %d > 5，截断为最高两级子组合", plan_id, trial_combos)
+                    combo_sizes = [n - 1, n] if n >= 2 else [n]
+
                 cover = _build_plan(
                     f"{plan_id}_cover", f"{name}·容错", legs,
                     base_stake, multiplier, budget,
-                    combo_sizes=list(range(2, n + 1)),
+                    combo_sizes=combo_sizes,
                 )
+                if scheme_dir and scheme_dir.cover:
+                    cover.ai_rationale = f"[容错说明] {scheme_dir.cover.rationale}"
+                cover.ai_excluded = excluded_list
                 plans.append(cover)
 
         # Kelly 动态调整注额（含回撤保护）
         if plans:
             kelly_stakes = kelly_allocate(plans, budget, recent_roi=recent_roi)
             for plan in plans:
-                stake = kelly_stakes.get(plan.plan_id, plan.base_stake * plan.num_combos * plan.multiplier)
+                original_stake = plan.base_stake * plan.num_combos * plan.multiplier
+                stake = kelly_stakes.get(plan.plan_id, original_stake)
                 plan.total_stake = round(stake, 1)
-                plan.theoretical_prize = round(stake * plan.total_odds, 1)
+                if plan.combo_sizes and len(plan.combo_sizes) > 1:
+                    # M串N：theoretical_prize 已在 _build_plan 中设为 max_payout，
+                    # Kelly 调整注额时按比例缩放，而非错误地用 stake × conditional_odds
+                    scale = stake / original_stake if original_stake > 0 else 1.0
+                    plan.theoretical_prize = round(plan.theoretical_prize * scale, 1)
+                else:
+                    plan.theoretical_prize = round(stake * plan.total_odds, 1)
 
         # 比分方案：从各场次的 scoreline_legs 收集
         scoreline_plan = _build_scoreline_plan(enriched_predictions, budget)
@@ -730,7 +802,7 @@ def _select_market(
             ev = hhad_p * hhad_odds_val - 1
             best_hhad = {"ev": ev, "odds": hhad_odds_val, "handicap": handicap, "prob": hhad_p}
 
-    if best_hhad and best_hhad["ev"] > had_ev:
+    if best_hhad and best_hhad["ev"] > had_ev + _HHAD_PREFERENCE_MARGIN:
         return ("让球胜平负", best_hhad["odds"], best_hhad["handicap"], best_hhad["prob"], False)
 
     if had_odds:
@@ -750,6 +822,11 @@ def _compute_votes(votes: list[dict], pick: str) -> tuple[int, int, list[str]]:
     agreed = [v for v in votes if v.get("outcome") == target_outcome]
     model_names = [v.get("model", "") for v in agreed]
     return len(agreed), total, model_names
+
+
+def _get_scheme_dir(directive, plan_id: str):
+    """取 directive 中对应 plan_id 的 SchemeDirective；directive 为 None 时返回 None。"""
+    return getattr(directive, plan_id, None) if directive is not None else None
 
 
 def _best_legs(legs: list[ParlayLeg], max_legs: int, strategy: str) -> list[ParlayLeg]:
@@ -813,8 +890,6 @@ def _build_plan(
     combo_sizes: list[int] | None = None,
 ) -> ParlayPlan:
     """构建串关方案。combo_sizes=None 为普通 n串1；传 [2..n] 为 M串N 容错方案。"""
-    from itertools import combinations
-
     n = len(legs)
     if combo_sizes is None:
         combo_sizes = [n]
@@ -871,7 +946,9 @@ def _build_plan(
         win_prob = p_any
         cond_payout = exp_payout / p_any if p_any > 0 else 0.0
         total_odds = cond_payout / total_stake if total_stake > 0 else 0.0
-        theoretical_prize = cond_payout
+        # 全腿命中时所有子组合均派奖（与竞彩官网"理论最高奖金"口径一致）
+        max_payout = sum(base_stake * multiplier * nb * op for _, nb, op, _ in combos)
+        theoretical_prize = max_payout
 
     avg_prob = win_prob ** (1 / n) if n > 0 else 0
     all_no_votes = all(leg.model_votes_total == 0 for leg in legs)
@@ -884,7 +961,7 @@ def _build_plan(
     )
     base_score = avg_prob * 100
     consensus_bonus = avg_consensus * 20
-    odds_penalty = max(0, (5 - total_odds) * 3) if plan_id.startswith("conservative") else 0
+    odds_penalty = max(0, (5 - total_odds) * 3) if plan_id == "conservative" else 0
     score = max(5, min(99, round(base_score + consensus_bonus - odds_penalty)))
     stars = _score_to_stars(score)
     tag = _build_tag(plan_id, legs, avg_consensus, win_prob)

@@ -2,6 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import api, { betsApi, type BetRecord, type BetSummary } from '@/api'
+import InfoTip from '@/components/InfoTip.vue'
 
 // ── 页面级 tab ─────────────────────────────────────────────────
 const pageTab = ref<'records' | 'auto'>('records')
@@ -78,7 +79,7 @@ interface AutoRun {
   id: number
   run_date: string
   trigger: string
-  model_info: { llms: string[]; type: string } | null
+  model_info: { llms: string[]; type: string; tokens?: { prompt: number; completion: number } } | null
   match_ids: number[]
   stake: number
   schemes: AutoScheme[]
@@ -283,6 +284,9 @@ function schemeStatusShort(s: string | undefined): string {
 const syncedCount = computed(() => autoRuns.value.filter(r => r.sync_status === 'synced').length)
 const skippedCount = computed(() => autoRuns.value.filter(r => r.sync_status === 'skipped').length)
 const hasAnyModelRuns = computed(() => autoRuns.value.some(r => r.model_info?.llms?.length))
+
+// 统计区块折叠控制
+const statsExpanded = ref(false)
 
 // ── 筛选状态 ─────────────────────────────────────────────────────
 const typeFilter   = ref<string | null>(null)
@@ -508,15 +512,15 @@ const maxAbsProfit = computed(() =>
           <div class="kpi-val">¥{{ summary?.total_stake?.toFixed(0) ?? '—' }}</div>
         </div>
         <div class="kpi-cell" :class="{ 'kpi--pos': (summary?.profit ?? 0) >= 0, 'kpi--neg': (summary?.profit ?? 0) < 0 }">
-          <div class="kpi-label">总盈亏</div>
+          <div class="kpi-label">总盈亏 <InfoTip text="实际盈利或亏损金额（元）。= 总奖金 − 总投入。正数为盈利，负数为亏损。" /></div>
           <div class="kpi-val">{{ profitSign(summary?.profit) }}{{ summary?.profit?.toFixed(0) ?? '—' }}</div>
         </div>
         <div class="kpi-cell">
-          <div class="kpi-label">ROI</div>
+          <div class="kpi-label">ROI <InfoTip text="投资回报率（%）= 盈亏 ÷ 总投入 × 100。>0 表示盈利，常见彩票长期ROI约-25%到-50%，突破0%即跑赢彩票基准线。" /></div>
           <div class="kpi-val" :class="(summary?.roi ?? 0) >= 0 ? 'text-g' : 'text-r'">{{ profitSign(summary?.roi) }}{{ summary?.roi?.toFixed(1) ?? '—' }}%</div>
         </div>
         <div class="kpi-cell">
-          <div class="kpi-label">串票命中</div>
+          <div class="kpi-label">串票命中 <InfoTip text="串关方案全部命中的比例（%）。串关需要所有腿同时中奖，3串1每腿60%胜率时全串中奖率约22%，属正常水平。" /></div>
           <div class="kpi-val" :class="hitRateClass(summary?.hit_rate ?? 0)">{{ summary?.hit_rate?.toFixed(1) ?? '—' }}%</div>
         </div>
       </div>
@@ -709,6 +713,18 @@ const maxAbsProfit = computed(() =>
           </div>
         </div>
 
+        <!-- 分析折叠开关 -->
+        <button class="stats-toggle-btn" @click="statsExpanded = !statsExpanded" :aria-expanded="statsExpanded">
+          <svg width="13" height="13" viewBox="0 0 20 20" fill="currentColor" :style="statsExpanded ? 'transform:rotate(180deg);transition:.2s' : 'transition:.2s'">
+            <path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd"/>
+          </svg>
+          {{ statsExpanded ? '收起命中分析' : '查看命中分析' }}
+          <span v-if="activeFilterCount > 0 && !statsExpanded" class="stats-toggle-filter">{{ activeFilterCount }} 个筛选生效</span>
+        </button>
+
+        <!-- ZONE 2-8 折叠区 -->
+        <div v-show="statsExpanded">
+
         <!-- ZONE 2 — 方案命中率 (4格) -->
         <div class="zone">
           <div class="zone-hd">方案命中率 <span class="zone-hint">点击筛选历史</span></div>
@@ -872,6 +888,8 @@ const maxAbsProfit = computed(() =>
           </div>
         </div>
 
+        </div><!-- /v-show stats -->
+
         <!-- 筛选状态条 -->
         <div v-if="activeFilterCount > 0" class="filter-bar">
           <span class="fb-info">
@@ -934,6 +952,9 @@ const maxAbsProfit = computed(() =>
                   <span class="run-model">{{ formatModelLabel(run.model_info) }}</span>
                   <span class="run-model-type">{{ run.model_info.type === 'ensemble' ? '混合' : '单模型' }}</span>
                   <span class="run-match-n">{{ run.match_ids?.length ?? 0 }} 场</span>
+                  <span v-if="run.model_info.tokens" class="run-tokens">
+                    {{ ((run.model_info.tokens.prompt + run.model_info.tokens.completion) / 1000).toFixed(1) }}k tokens
+                  </span>
                 </div>
 
                 <!-- 方案芯片 -->
@@ -1666,6 +1687,36 @@ const maxAbsProfit = computed(() =>
   border-radius: 3px;
 }
 
+/* ── 分析折叠按钮 ───────────────────────────────────────────── */
+.stats-toggle-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 10px 14px;
+  background: var(--card);
+  border: none;
+  border-bottom: 1px solid var(--line);
+  color: var(--text2);
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+  transition: background .12s;
+}
+.stats-toggle-btn:hover { background: var(--bg); }
+.stats-toggle-btn svg { flex-shrink: 0; color: var(--text3); }
+.stats-toggle-filter {
+  margin-left: auto;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--primary);
+  background: var(--primary-t);
+  padding: 1px 7px;
+  border-radius: 10px;
+}
+
 /* ── 筛选状态条 ─────────────────────────────────────────────── */
 .filter-bar {
   display: flex;
@@ -1773,6 +1824,7 @@ const maxAbsProfit = computed(() =>
 .run-model { font-size: 10px; color: var(--text3); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .run-model-type { font-size: 9px; color: var(--text3); background: var(--bg); padding: 1px 5px; border-radius: 3px; flex-shrink: 0; }
 .run-match-n { font-size: 10px; color: var(--text3); font-family: var(--font-num); flex-shrink: 0; }
+.run-tokens { font-size: 9px; color: var(--text3); opacity: .7; font-family: var(--font-num); flex-shrink: 0; }
 
 /* ── 方案芯片行 ──────────────────────────────────────────────── */
 .scheme-row {

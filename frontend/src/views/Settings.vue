@@ -130,6 +130,14 @@ function modelOptions(cfg: LLMConfig): string[] {
   return modelLists.value[cfg.provider] ?? []
 }
 
+// 兼容 Kimi 等 provider 的版本后缀（moonshot-v1-8k-20240901 vs moonshot-v1-8k）
+function isModelMismatch(cfg: LLMConfig): boolean {
+  const opts = modelOptions(cfg)
+  if (!cfg.model || opts.length === 0) return false
+  if (opts.includes(cfg.model)) return false
+  return !opts.some(m => m.startsWith(cfg.model + '-') || cfg.model.startsWith(m + '-'))
+}
+
 
 const PROVIDER_META: Record<string, { label: string; badge: string; chip: string; default_model: string; default_base_url: string }> = {
   claude:   { label: 'Claude',   badge: 'badge-red',   chip: 'CL',  default_model: 'claude-sonnet-4-6',  default_base_url: 'https://api.anthropic.com' },
@@ -490,8 +498,9 @@ onMounted(load)
             <span v-if="llmConfigs.length" class="lc-count">{{ llmConfigs.length }}</span>
           </div>
           <div class="lc-bar-r">
+            <label class="lc-pick-lbl" for="new-provider-sel">服务商</label>
             <Select v-model="newProvider">
-              <SelectTrigger class="lc-pick">
+              <SelectTrigger class="lc-pick" id="new-provider-sel">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -523,7 +532,12 @@ onMounted(load)
             <span class="lc-sum-val font-num">{{ llmConfigs.filter(c => c.status === 'ok').length }}</span>
             <span class="lc-sum-lbl">/ {{ llmConfigs.filter(c => c.id).length }} 在线</span>
           </span>
-          <span v-if="llmConfigs.some(c => c.status === 'error')" class="lc-sum-warn">⚠ 有配置异常</span>
+          <span v-if="llmConfigs.some(c => c.status === 'error')" class="lc-sum-warn">
+            <svg width="9" height="9" viewBox="0 0 20 20" fill="currentColor" style="flex-shrink:0">
+              <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H2.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"/>
+            </svg>
+            有配置异常
+          </span>
         </div>
 
         <!-- empty state -->
@@ -550,8 +564,13 @@ onMounted(load)
               <code class="lc-mslug">{{ cfg.model || '—' }}</code>
             </div>
             <div class="lc-tags">
-              <template v-if="cfg.model && modelOptions(cfg).length > 0 && !modelOptions(cfg).includes(cfg.model)">
-                <span class="lc-tag lc-tag--gold">⚠ 不匹配</span>
+              <template v-if="isModelMismatch(cfg)">
+                <span class="lc-tag lc-tag--gold">
+                  <svg width="8" height="8" viewBox="0 0 20 20" fill="currentColor">
+                    <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H2.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"/>
+                  </svg>
+                  不匹配
+                </span>
                 <button class="lc-fix-btn" @click.stop="fixMismatch(cfg)">修复</button>
               </template>
               <span v-if="cfg.id && llmResult[cfg.id]" class="lc-tag"
@@ -1102,6 +1121,15 @@ onMounted(load)
   font-weight: 700;
 }
 .lc-bar-r { display: flex; align-items: center; gap: 7px; }
+.lc-pick-lbl {
+  font-family: var(--font-disp);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .4px;
+  color: var(--text3);
+  white-space: nowrap;
+}
 .lc-pick {
   appearance: none;
   background: var(--card);
@@ -1754,6 +1782,9 @@ onMounted(load)
 .lc-sum-lbl { font-size: 11px; color: var(--text3); }
 .lc-sum-sep { font-size: 11px; color: var(--line); }
 .lc-sum-warn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   font-size: 10px;
   font-weight: 700;
   color: var(--gold);

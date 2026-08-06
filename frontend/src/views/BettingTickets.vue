@@ -5,6 +5,7 @@ import { useRouter, useRoute } from 'vue-router'
 import api, { betsApi } from '@/api'
 import { useBettingStore } from '@/stores/betting'
 import AnalysisModeSheet from '@/components/AnalysisModeSheet.vue'
+import InfoTip from '@/components/InfoTip.vue'
 import { useAnalysisPreference, type AnalysisMode } from '@/composables/useAnalysisPreference'
 import { useTicketTask } from '@/composables/useTicketTask'
 import {
@@ -41,6 +42,12 @@ interface Leg {
   model_votes?: { agree: number; total: number; models?: string[] }
   rationale?: string
 }
+interface AiExcluded {
+  match_id: number
+  home_team?: string
+  away_team?: string
+  reason: string
+}
 interface Scheme {
   legs: Leg[]
   total_odds?: number
@@ -51,13 +58,21 @@ interface Scheme {
   parlay_type?: string
   win_probability?: number
   theoretical_prize?: number
+  max_unit_prize?: number   // 容错方案：单倍理论最高奖金，前端乘 localMultiplier 展示
+  ai_rationale?: string     // AI 全局决策给出的方案结构说明
+  ai_excluded?: AiExcluded[] // 被排除场次列表
+}
+interface LlmUsage {
+  prompt_tokens: number
+  completion_tokens: number
+  calls: number
 }
 interface Schemes {
   conservative?: Scheme
   balanced?: Scheme
   high_odds?: Scheme
   scoreline?: Scheme
-  [key: string]: Scheme | undefined  // 容错方案：conservative_cover 等动态键
+  [key: string]: Scheme | undefined
 }
 
 // ── State ────────────────────────────────────────────────────
@@ -72,6 +87,7 @@ const pendingMatchIds = ref<number[]>([])
 const currentMatchName = ref('')
 
 const schemes = ref<Schemes | null>(null)
+const lastLlmUsage = ref<LlmUsage | null>(null)
 const activeTab = ref<string>('conservative')
 const error = ref<string | null>(null)
 const progressIndex = ref(0)
@@ -93,30 +109,34 @@ const BASE_TABS = [
   { key: 'scoreline',    label: '比分', risk: '极高' },
 ]
 
-// 动态标签页：后端返回的 M串N 容错方案（*_cover）插在对应基础方案后
-const TABS = computed(() => {
-  const tabs = [...BASE_TABS]
-  if (schemes.value) {
-    for (const b of BASE_TABS) {
-      const ck = `${b.key}_cover`
-      if (schemes.value[ck]?.legs?.length) {
-        const at = tabs.findIndex(t => t.key === b.key) + 1
-        tabs.splice(at, 0, { key: ck, label: `${b.label}·容错`, risk: b.risk })
-      }
-    }
-  }
-  return tabs
-})
+const TABS = computed(() => BASE_TABS)
+
+const coverExpanded = ref(false)
+const aiRationaleExpanded = ref(false)
 
 const STEPS = [
-  { key: 'check',  label: '检查已有分析' },
-  { key: 'ai',     label: 'AI 情报分析' },
-  { key: 'model',  label: '概率建模' },
-  { key: 'ticket', label: '票型生成' },
+  { key: 'check',           label: '检查已有分析' },
+  { key: 'ai',              label: 'AI 情报分析' },
+  { key: 'global_decision', label: 'AI 方案决策' },
+  { key: 'model',           label: '概率建模' },
+  { key: 'ticket',          label: '票型生成' },
 ]
 
 // ── Derived ──────────────────────────────────────────────────
+const coverScheme   = computed(() => schemes.value?.[activeTab.value + '_cover'] ?? null)
+const hasCoverPlan  = computed(() => !!(coverScheme.value?.legs?.length))
 const activeScheme  = computed(() => schemes.value?.[activeTab.value] ?? null)
+
+const coverNumCombos  = computed(() => coverScheme.value?.num_combos ?? 1)
+const coverTotalStake = computed(() => localStake.value * coverNumCombos.value)
+const coverMaxPrize   = computed(() => {
+  if (!coverScheme.value) return 0
+  if (coverScheme.value.max_unit_prize != null) return Math.round(coverScheme.value.max_unit_prize * localMultiplier.value)
+  return Math.round(localStake.value * (coverScheme.value.total_odds ?? 1))
+})
+const coverPartialPrize = computed(() =>
+  coverNumCombos.value > 1 ? Math.round(coverMaxPrize.value / coverNumCombos.value) : 0
+)
 const activeTabInfo = computed(() => TABS.value.find(t => t.key === activeTab.value) ?? TABS.value[0])
 const hasSchemes    = computed(() => schemes.value && TABS.value.some(t => schemes.value![t.key]?.legs?.length))
 const hasEstimatedOdds = computed(() => {
@@ -128,15 +148,32 @@ const hasEstimatedOdds = computed(() => {
   return false
 })
 
-// Sync localMultiplier when active scheme changes
-watch(activeScheme, (scheme) => {
-  if (scheme?.stake != null) localMultiplier.value = Math.max(1, Math.round(scheme.stake / 2))
+watch(activeTab, () => { coverExpanded.value = false; aiRationaleExpanded.value = false })
+
+// 初始化 localMultiplier：仅在 schemes 首次加载时同步一次，tab 切换不重置
+watch(schemes, (newSchemes) => {
+  if (!newSchemes) return
+  const firstTab = TABS.value.find(t => newSchemes[t.key]?.legs?.length)
+  const scheme = firstTab ? newSchemes[firstTab.key] : null
+  if (scheme?.stake != null) {
+    const combos = scheme.num_combos ?? 1
+    localMultiplier.value = Math.max(1, Math.round(scheme.stake / (2 * combos)))
+  }
 }, { immediate: true })
 
+// 每注固定 2 元 × 用户倍数；容错方案总注数 = num_combos 注
 const localStake = computed(() => Math.max(1, Math.round(localMultiplier.value)) * 2)
-const dynamicPrize = computed(() =>
-  Math.round(localStake.value * (activeScheme.value?.total_odds ?? 1))
-)
+const activeNumCombos = computed(() => activeScheme.value?.num_combos ?? 1)
+const localTotalStake = computed(() => localStake.value * activeNumCombos.value)
+const dynamicPrize = computed(() => {
+  const scheme = activeScheme.value
+  if (!scheme) return 0
+  // 容错方案用理论最高奖金（全腿命中），与竞彩官网口径一致
+  if (activeNumCombos.value > 1 && scheme.max_unit_prize != null) {
+    return Math.round(scheme.max_unit_prize * localMultiplier.value)
+  }
+  return Math.round(localStake.value * (scheme.total_odds ?? 1))
+})
 
 function pickColorClass(pick: string) {
   if (/主胜/.test(pick) || pick === '3') return 'tag-win'
@@ -186,6 +223,17 @@ function _resetProgressState() {
   _lastEventIndex = 0
 }
 
+function _applyResult(result: any, summary?: string) {
+  schemes.value = result
+  lastLlmUsage.value = (result?.llm_usage as LlmUsage | null | undefined) ?? null
+  for (const t of TABS.value) {
+    if (result?.[t.key]?.legs?.length) { activeTab.value = t.key; break }
+  }
+  completedSteps.value = STEPS.length
+  if (summary) stepLog.value[STEPS.length - 1] = summary
+  bettingStore.save(result, activeTab.value, lastMatchIds.value)
+}
+
 function stopPolling() {
   if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null }
   if (_elapsedTimer) { clearInterval(_elapsedTimer); _elapsedTimer = null }
@@ -211,13 +259,7 @@ async function _poll(taskId: string) {
       } else if (ev.event === 'done') {
         // result is in data.result (written to Redis separately)
         if (data.result) {
-          schemes.value = data.result
-          for (const t of TABS.value) {
-            if (data.result?.[t.key]?.legs?.length) { activeTab.value = t.key; break }
-          }
-          completedSteps.value = STEPS.length
-          if (ev.summary) stepLog.value[STEPS.length - 1] = ev.summary
-          bettingStore.save(data.result, activeTab.value, lastMatchIds.value)
+          _applyResult(data.result, ev.summary)
           stopPolling()
           return
         }
@@ -233,12 +275,7 @@ async function _poll(taskId: string) {
 
     // Safety: done event was consumed in a previous tick but result arrived late
     if (!schemes.value && data.result) {
-      schemes.value = data.result
-      for (const t of TABS.value) {
-        if (data.result?.[t.key]?.legs?.length) { activeTab.value = t.key; break }
-      }
-      completedSteps.value = STEPS.length
-      bettingStore.save(data.result, activeTab.value, lastMatchIds.value)
+      _applyResult(data.result)
       stopPolling()
       return
     }
@@ -340,6 +377,7 @@ function goCustomSelect() {
 
 function resetSchemes() {
   schemes.value = null
+  lastLlmUsage.value = null
   error.value = null
   completedSteps.value = 0
   bettingStore.clear()
@@ -621,6 +659,16 @@ onUnmounted(() => {
         </div>
       </div>
 
+      <!-- LLM token usage (only shown when new analysis was run) -->
+      <div v-if="lastLlmUsage" class="llm-usage-bar">
+        <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
+          <path d="M8 2v12M4 6l4-4 4 4M4 10l4 4 4-4"/>
+        </svg>
+        本次分析 {{ (lastLlmUsage.prompt_tokens + lastLlmUsage.completion_tokens).toLocaleString() }} tokens
+        <span class="usage-split">提示词 {{ lastLlmUsage.prompt_tokens.toLocaleString() }} · 回答 {{ lastLlmUsage.completion_tokens.toLocaleString() }}</span>
+        <span v-if="lastLlmUsage.calls > 1" class="usage-calls">· {{ lastLlmUsage.calls }} 场</span>
+      </div>
+
       <!-- Tabs -->
       <div class="scheme-tabs">
         <button
@@ -634,7 +682,7 @@ onUnmounted(() => {
           <span class="tab-label">{{ t.label }}</span>
           <span class="tab-risk">{{ t.risk }}</span>
           <span class="tab-count font-num">
-            {{ schemes![t.key]?.legs?.length ? `${schemes![t.key]!.legs.length}串1` : '—' }}
+            {{ schemes![t.key]?.legs?.length ? (schemes![t.key]!.parlay_type || `${schemes![t.key]!.legs.length}串1`) : '—' }}
           </span>
         </button>
       </div>
@@ -646,8 +694,9 @@ onUnmounted(() => {
         <div class="scheme-card-head">
           <div class="scheme-card-head-left">
             <span class="scheme-name">{{ activeTabInfo.label }}方案</span>
-            <span class="scheme-parlay font-num">
+            <span v-if="activeTab !== 'scoreline'" class="scheme-parlay font-num">
               {{ activeScheme.parlay_type || `${activeScheme.legs?.length}串1` }}
+              <InfoTip text="串关：将多场比赛合并为一张票，需全部命中才算中奖。3串1=3场全对，赔率连乘，奖金高但难度也成倍增加。" />
             </span>
             <span v-if="activeScheme.num_combos && activeScheme.num_combos > 1" class="scheme-combos font-num">
               共{{ activeScheme.num_combos }}注
@@ -684,16 +733,38 @@ onUnmounted(() => {
               </div>
               <div class="leg-meta">
                 <span class="leg-league">{{ leg.league }}</span>
-                <span v-if="leg.model_votes?.total" class="leg-votes font-num">
-                  {{ leg.model_votes.agree }}/{{ leg.model_votes.total }}共识
+                <!-- 多选腿：显示覆盖策略，不显示共识（共识针对单一方向，多选无意义） -->
+                <span v-if="leg.picks && leg.picks.length > 1" class="leg-cover-badge">
+                  覆盖{{ leg.picks.length }}选
+                  <InfoTip text="博高赔策略：AI模型对本场意见分歧，分别推荐了不同方向。系统将两个方向都纳入，命中任意一个均可贡献赔率。注数因此翻倍，属于主动覆盖策略，非预测失准。" />
                 </span>
+                <!-- 单选腿：显示共识程度 -->
+                <template v-else-if="leg.model_votes?.total">
+                  <span v-if="leg.model_votes.agree === leg.model_votes.total" class="leg-votes leg-votes--consensus font-num">
+                    全票
+                    <InfoTip text="全票共识：所有参与分析的AI模型均推荐同一方向，置信度最高。" />
+                  </span>
+                  <span v-else-if="leg.model_votes.agree > 0" class="leg-votes font-num">
+                    {{ leg.model_votes.agree }}/{{ leg.model_votes.total }}共识
+                    <InfoTip text="共识：参与分析的AI模型中，有多少个认同本场推荐方向。1/2=意见分歧，当前取多数派方向，需谨慎。" />
+                  </span>
+                  <span v-else class="leg-votes leg-votes--low font-num">
+                    参考
+                    <InfoTip text="模型分歧：参与分析的AI模型未就本场形成共识，此推荐仅供参考，风险较高。" />
+                  </span>
+                </template>
                 <span v-else-if="leg.confidence" class="leg-conf font-num">{{ leg.confidence }}%</span>
               </div>
               <div v-if="leg.rationale" class="leg-rationale">{{ leg.rationale }}</div>
             </div>
             <div class="leg-pick-col">
-              <span v-if="leg.market === '让球胜平负'" class="leg-hhad-badge">让</span>
-              <!-- Multi-pick: render each outcome as a separate badge -->
+              <!-- 让球盘：徽章 + 让球数合并为一行 -->
+              <div v-if="leg.market === '让球胜平负'" class="leg-hhad-row">
+                <span class="leg-hhad-badge">让</span>
+                <span class="leg-handicap font-num">{{ leg.handicap_label }}</span>
+                <InfoTip text="让球盘：竞彩为平衡强弱差距设置的特殊盘口。「受让X球」=主队获X球优势，更容易中；「主让X球」=强队须赢X球以上才算中，赔率更高。" />
+              </div>
+              <!-- 选项徽章（多选） -->
               <template v-if="leg.picks && leg.picks.length > 1">
                 <span
                   v-for="(p, pi) in leg.picks"
@@ -701,21 +772,29 @@ onUnmounted(() => {
                   class="leg-pick"
                   :class="pickColorClass(p)"
                 >{{ pickLabel(p) }}</span>
-                <span class="leg-pick-code font-num">{{ leg.pick_codes?.join('/') }}</span>
               </template>
-              <!-- Single pick -->
+              <!-- 选项徽章（单选） -->
               <template v-else>
                 <span class="leg-pick" :class="pickColorClass(leg.pick)">{{ pickLabel(leg.pick) }}</span>
-                <span v-if="leg.pick_code" class="leg-pick-code font-num">{{ leg.pick_code }}</span>
               </template>
-              <span v-if="leg.handicap_label" class="leg-handicap font-num">{{ leg.handicap_label }}</span>
             </div>
             <div class="leg-odds-col">
-              <span v-if="leg.odds" class="leg-odds font-num" :class="{ 'leg-odds--est': leg.odds_estimated }">
-                {{ leg.odds.toFixed(2) }}
-              </span>
-              <span v-if="leg.odds_estimated" class="leg-odds-est-badge">预估</span>
-              <span v-else-if="!leg.odds" class="leg-odds text-muted">—</span>
+              <!-- 多选腿：每个 pick 对应各自赔率，与左列徽章垂直对齐 -->
+              <template v-if="leg.picks && leg.picks.length > 1 && leg.picks_odds?.length">
+                <span
+                  v-for="(o, oi) in leg.picks_odds"
+                  :key="oi"
+                  class="leg-odds font-num"
+                >{{ o.toFixed(2) }}</span>
+              </template>
+              <!-- 单选腿（或无 picks_odds 的多选腿 fallback） -->
+              <template v-else>
+                <span v-if="leg.odds" class="leg-odds font-num" :class="{ 'leg-odds--est': leg.odds_estimated }">
+                  {{ leg.odds.toFixed(2) }}
+                </span>
+                <span v-if="leg.odds_estimated" class="leg-odds-est-badge">预估</span>
+                <span v-else-if="!leg.odds" class="leg-odds text-muted">—</span>
+              </template>
             </div>
           </div>
         </div>
@@ -723,45 +802,77 @@ onUnmounted(() => {
         <!-- Divider -->
         <div class="scheme-divider" />
 
-        <!-- Stats -->
-        <div class="scheme-stats">
-          <div class="stat-cell">
-            <div class="stat-label">倍数</div>
-            <div class="stat-stake-wrap">
-              <input
-                v-model.number="localMultiplier"
-                type="number"
-                min="1"
-                max="500"
-                step="1"
-                class="stat-stake-input font-num"
-              />
-              <span class="stat-currency font-num">倍</span>
+        <!-- Scoreline: no parlay stats, show per-match note -->
+        <template v-if="activeTab === 'scoreline'">
+          <div class="scoreline-note">
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+              <circle cx="8" cy="8" r="6.5"/><path d="M8 5v3.5M8 10.5h.01"/>
+            </svg>
+            比分投注为独立单场购彩，每场分别出票，非串关。赔率极高，命中率极低，建议每场最低1倍（¥2）小注试水。
+          </div>
+          <div class="scheme-stats">
+            <div class="stat-cell">
+              <div class="stat-label">每场倍数</div>
+              <div class="stat-stake-wrap">
+                <input v-model.number="localMultiplier" type="number" min="1" max="500" step="1" class="stat-stake-input font-num" />
+                <span class="stat-currency font-num">倍</span>
+              </div>
+              <div class="stat-stake-hint font-num">每场 ¥{{ localStake }}</div>
             </div>
-            <div class="stat-stake-hint font-num">= ¥{{ localStake }}</div>
+            <div class="stat-sep" />
+            <div class="stat-cell">
+              <div class="stat-label">场次数</div>
+              <div class="stat-val font-num text-primary">{{ activeScheme.legs?.length ?? 0 }}</div>
+              <div class="stat-stake-hint font-num">合计 ¥{{ localStake * (activeScheme.legs?.length ?? 0) }}</div>
+            </div>
           </div>
-          <div class="stat-sep" />
-          <div class="stat-cell">
-            <div class="stat-label">综合赔率</div>
-            <div class="stat-val font-num text-primary">×{{ activeScheme.total_odds?.toFixed(2) ?? '—' }}</div>
-          </div>
-          <div class="stat-sep" />
-          <div class="stat-cell">
-            <div class="stat-label">预期彩金</div>
-            <div class="stat-val font-num text-green">¥{{ dynamicPrize }}</div>
-          </div>
-        </div>
+        </template>
 
-        <!-- Win probability bar -->
-        <div v-if="activeScheme.win_probability" class="win-prob-bar-wrap">
-          <div class="win-prob-label">
-            <span>中奖概率</span>
-            <span class="font-num text-primary">{{ (activeScheme.win_probability * 100).toFixed(1) }}%</span>
+        <!-- Regular plans: combined parlay stats -->
+        <template v-else>
+          <div class="scheme-stats">
+            <div class="stat-cell">
+              <div class="stat-label">倍数 <InfoTip text="购彩倍数：1倍=基础2元×注数。倍数越高奖金等比放大，总投入同步增加。建议从1倍开始，熟悉方案后再加倍。" /></div>
+              <div class="stat-stake-wrap">
+                <input
+                  v-model.number="localMultiplier"
+                  type="number"
+                  min="1"
+                  max="500"
+                  step="1"
+                  class="stat-stake-input font-num"
+                />
+                <span class="stat-currency font-num">倍</span>
+              </div>
+              <div class="stat-stake-hint font-num">
+                <template v-if="activeNumCombos > 1">¥{{ localStake }}/注 × {{ activeNumCombos }}注 = ¥{{ localTotalStake }}</template>
+                <template v-else>= ¥{{ localStake }}</template>
+              </div>
+            </div>
+            <div class="stat-sep" />
+            <div class="stat-cell">
+              <div class="stat-label">综合赔率 <InfoTip text="所有参赛腿赔率连乘的结果。代表全串全中时每元的回报倍数（税前估算）。" /></div>
+              <div class="stat-val font-num text-primary">×{{ activeScheme.total_odds?.toFixed(2) ?? '—' }}</div>
+            </div>
+            <div class="stat-sep" />
+            <div class="stat-cell">
+              <div class="stat-label">预期彩金 <InfoTip text="全串全中的理论奖金（注额×综合赔率）。竞彩实际派奖会扣除税费，仅供参考，以官网结算为准。" /></div>
+              <div class="stat-val font-num text-green">¥{{ dynamicPrize }}</div>
+              <div v-if="activeNumCombos > 1" class="stat-stake-hint font-num">{{ activeNumCombos }}注全中理论最高奖</div>
+            </div>
           </div>
-          <div class="win-prob-track">
-            <div class="win-prob-fill" :style="{ width: `${Math.min(activeScheme.win_probability * 100, 100)}%` }" />
+
+          <!-- Win probability bar -->
+          <div v-if="activeScheme.win_probability" class="win-prob-bar-wrap">
+            <div class="win-prob-label">
+              <span>中奖概率 <InfoTip text="各腿中奖概率连乘后的理论全串中奖率，基于AI模型估算。腿越多概率越低：3串1通常在15-35%之间为合理区间。" /></span>
+              <span class="font-num text-primary">{{ (activeScheme.win_probability * 100).toFixed(1) }}%</span>
+            </div>
+            <div class="win-prob-track">
+              <div class="win-prob-fill" :style="{ width: `${Math.min(activeScheme.win_probability * 100, 100)}%` }" />
+            </div>
           </div>
-        </div>
+        </template>
 
         <!-- Mark as bet button -->
         <div class="bet-action-row">
@@ -774,7 +885,7 @@ onUnmounted(() => {
           </button>
         </div>
 
-        <!-- AI rationale -->
+        <!-- AI rationale (per-leg) -->
         <div v-if="activeScheme.rationale" class="scheme-rationale">
           <div class="rationale-header">
             <span class="chat-avatar chat-avatar--sm">AI</span>
@@ -782,12 +893,119 @@ onUnmounted(() => {
           </div>
           <p class="rationale-body">{{ activeScheme.rationale }}</p>
         </div>
+
+        <!-- AI global structure rationale -->
+        <div v-if="activeScheme.ai_rationale" class="ai-structure-rationale">
+          <div class="ai-str-head" @click="aiRationaleExpanded = !aiRationaleExpanded">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M8 2a4 4 0 0 1 4 4c0 2-1.5 3.5-2 4H6c-.5-.5-2-2-2-4a4 4 0 0 1 4-4z"/><path d="M6 13h4M7 15h2"/>
+            </svg>
+            <span class="ai-str-label">AI 串关结构分析</span>
+            <svg class="ai-str-chevron" :class="{ 'rotate-180': aiRationaleExpanded }" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+              <path d="M4 6l4 4 4-4"/>
+            </svg>
+          </div>
+          <p v-if="aiRationaleExpanded" class="ai-str-body">{{ activeScheme.ai_rationale }}</p>
+        </div>
+
+        <!-- Excluded matches -->
+        <div v-if="activeScheme.ai_excluded?.length" class="ai-excluded-list">
+          <div
+            v-for="ex in activeScheme.ai_excluded"
+            :key="ex.match_id"
+            class="ai-excluded-item"
+          >
+            <span class="ai-excluded-match">{{ ex.home_team ?? '未知' }} vs {{ ex.away_team ?? '未知' }}</span>
+            <span class="ai-excluded-reason">{{ ex.reason }}</span>
+          </div>
+        </div>
       </div>
 
       <!-- Empty tab state -->
       <div v-else class="empty-tip">
         <p class="empty-title" style="font-size:14px">该类型无推荐</p>
         <p class="text-sm text-muted mt-1">切换其他方案类型查看</p>
+      </div>
+
+      <!-- Cover plan expandable section -->
+      <div v-if="hasCoverPlan && activeScheme && activeTab !== 'scoreline'" class="cover-plan-card">
+        <div class="cover-plan-head" @click="coverExpanded = !coverExpanded">
+          <div class="cover-plan-head-left">
+            <div class="cover-plan-shield">
+              <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor">
+                <path d="M10 2L3 5v5c0 4.5 3.1 8.7 7 10 3.9-1.3 7-5.5 7-10V5l-7-3zm0 2.2l5 2.2v4.6c0 3.2-2.2 6.2-5 7.4-2.8-1.2-5-4.2-5-7.4V6.4l5-2.2z"/>
+              </svg>
+            </div>
+            <div>
+              <div class="cover-plan-title">加容错保底</div>
+              <div class="cover-plan-sub font-num">
+                {{ coverScheme?.parlay_type }} · {{ coverNumCombos }}注 · 允许1腿失误仍可中奖
+              </div>
+            </div>
+          </div>
+          <svg
+            class="cover-plan-chevron"
+            :class="{ 'cover-plan-chevron--open': coverExpanded }"
+            width="14" height="14" viewBox="0 0 16 16" fill="none"
+            stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+          >
+            <path d="M4 6l4 4 4-4"/>
+          </svg>
+        </div>
+
+        <template v-if="coverExpanded">
+          <!-- Win scenarios table -->
+          <div class="cover-win-table">
+            <div class="cover-win-header">命中场次 → 中奖预估</div>
+            <div class="cover-win-row cover-win-row--best">
+              <div class="cover-win-hit font-num">全 {{ coverScheme?.legs?.length }} 场命中</div>
+              <div class="cover-win-combos font-num">{{ coverNumCombos }}注全中</div>
+              <div class="cover-win-prize font-num text-green">¥{{ coverMaxPrize }}</div>
+            </div>
+            <div class="cover-win-row cover-win-row--partial">
+              <div class="cover-win-hit font-num">任意 {{ (coverScheme?.legs?.length ?? 1) - 1 }} 场命中</div>
+              <div class="cover-win-combos font-num">1注中奖</div>
+              <div class="cover-win-prize font-num text-green">≈ ¥{{ coverPartialPrize }}</div>
+            </div>
+            <div class="cover-win-row cover-win-row--loss">
+              <div class="cover-win-hit font-num">≤ {{ (coverScheme?.legs?.length ?? 2) - 2 }} 场命中</div>
+              <div class="cover-win-combos font-num">0注</div>
+              <div class="cover-win-prize text-muted">全输</div>
+            </div>
+          </div>
+
+          <!-- Cover legs compact list -->
+          <div class="cover-legs">
+            <div class="cover-leg-header">
+              <span>对阵</span>
+              <span>投注</span>
+              <span>赔率</span>
+            </div>
+            <div v-for="(leg, i) in coverScheme?.legs" :key="i" class="cover-leg">
+              <div class="cover-leg-info">
+                <span class="cover-leg-code font-num">{{ leg.match_code ? leg.match_code.slice(-3) : String(i+1).padStart(2,'0') }}</span>
+                <div class="cover-leg-teams">
+                  {{ leg.home_team }} vs {{ leg.away_team }}
+                </div>
+              </div>
+              <span class="leg-pick" :class="pickColorClass(leg.pick)">{{ pickLabel(leg.pick) }}</span>
+              <span class="cover-leg-odds font-num">{{ leg.odds?.toFixed(2) ?? '—' }}</span>
+            </div>
+          </div>
+
+          <!-- Stake + note -->
+          <div class="cover-stake-bar">
+            <div class="cover-stake-info font-num">
+              ¥{{ localStake }}/注 × {{ coverNumCombos }}注 = ¥{{ coverTotalStake }}
+            </div>
+            <div class="cover-stake-note">
+              <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+                <circle cx="8" cy="8" r="6.5"/><path d="M8 5v3.5M8 10.5h.01"/>
+              </svg>
+              M串N 需按子组合分别出票
+            </div>
+          </div>
+        </template>
       </div>
     </div>
 
@@ -1166,6 +1384,111 @@ onUnmounted(() => {
 .risk-badge.high_odds { background: color-mix(in srgb, #f59e0b 12%, transparent); color: #d97706; }
 .risk-badge.scoreline { background: color-mix(in srgb, #ef4444 12%, transparent); color: #ef4444; }
 
+/* ── Cover plan card ─────────────────────────────────────────── */
+.cover-plan-card {
+  background: var(--card);
+  border: var(--card-bd);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.cover-plan-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  cursor: pointer;
+  transition: background .12s;
+  -webkit-tap-highlight-color: transparent;
+}
+.cover-plan-head:hover { background: color-mix(in srgb, #3b82f6 4%, var(--card)); }
+.cover-plan-head:active { background: color-mix(in srgb, #3b82f6 8%, var(--card)); }
+.cover-plan-head-left { display: flex; align-items: center; gap: 10px; }
+.cover-plan-shield {
+  width: 30px; height: 30px;
+  border-radius: 6px;
+  background: color-mix(in srgb, #3b82f6 12%, transparent);
+  color: #3b82f6;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.cover-plan-title { font-size: 13px; font-weight: 700; color: var(--text); }
+.cover-plan-sub { font-size: 11px; color: var(--text3); margin-top: 1px; }
+.cover-plan-chevron { color: var(--text3); transition: transform .2s ease; flex-shrink: 0; }
+.cover-plan-chevron--open { transform: rotate(180deg); }
+
+.cover-win-table { border-top: var(--card-bd); background: color-mix(in srgb, #3b82f6 3%, var(--bg)); }
+.cover-win-header {
+  font-size: 10px; color: var(--text3);
+  padding: 8px 14px 4px;
+  letter-spacing: .3px; text-transform: uppercase;
+}
+.cover-win-row {
+  display: flex; align-items: center;
+  padding: 7px 14px; gap: 8px;
+  border-top: 1px solid color-mix(in srgb, var(--line) 50%, transparent);
+}
+.cover-win-hit { font-size: 12px; color: var(--text2); flex: 1; }
+.cover-win-combos { font-size: 11px; color: var(--text3); min-width: 56px; text-align: center; }
+.cover-win-prize { font-size: 13px; font-weight: 700; min-width: 56px; text-align: right; }
+.cover-win-row--best { background: color-mix(in srgb, var(--green, #22c55e) 5%, transparent); }
+.cover-win-row--loss { opacity: .55; }
+
+.cover-legs { border-top: var(--card-bd); }
+.cover-leg-header {
+  display: flex; align-items: center;
+  padding: 5px 14px; gap: 8px;
+  background: var(--bg); border-bottom: var(--card-bd);
+  font-size: 10px; color: var(--text3);
+}
+.cover-leg-header span:first-child { flex: 1; }
+.cover-leg-header span:nth-child(2) { min-width: 36px; text-align: center; }
+.cover-leg-header span:last-child { min-width: 40px; text-align: right; }
+.cover-leg {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 14px; border-bottom: var(--card-bd); font-size: 12px;
+}
+.cover-leg:last-child { border-bottom: none; }
+.cover-leg-info { flex: 1; display: flex; align-items: center; gap: 6px; min-width: 0; }
+.cover-leg-code {
+  font-size: 11px; font-weight: 700; color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+  border-radius: 3px; padding: 1px 4px; flex-shrink: 0;
+}
+.cover-leg-teams {
+  font-size: 11px; color: var(--text2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cover-leg-odds {
+  font-size: 13px; font-weight: 700; color: var(--primary);
+  min-width: 40px; text-align: right; font-family: var(--font-disp);
+}
+
+.cover-stake-bar {
+  border-top: var(--card-bd);
+  padding: 10px 14px;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  background: var(--bg);
+}
+.cover-stake-info { font-size: 12px; font-weight: 600; color: var(--text); }
+.cover-stake-note {
+  display: flex; align-items: center; gap: 4px;
+  font-size: 10px; color: var(--text3); flex-shrink: 0;
+}
+
+/* Scoreline note */
+.scoreline-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 14px;
+  background: color-mix(in srgb, #f59e0b 7%, var(--bg));
+  border-top: var(--card-bd);
+  font-size: 11px;
+  color: var(--text2);
+  line-height: 1.55;
+}
+.scoreline-note svg { flex-shrink: 0; color: #d97706; margin-top: 1px; }
+
 .leg-legend {
   display: flex; align-items: center;
   padding: 5px 14px;
@@ -1200,6 +1523,16 @@ onUnmounted(() => {
 .leg-league { font-size: 10px; color: var(--text3); }
 .leg-conf   { font-size: 10px; color: var(--primary); font-weight: 600; }
 .leg-votes  { font-size: 10px; color: var(--primary); font-weight: 600; }
+.leg-votes--consensus { color: var(--green, #22c55e); }
+.leg-votes--low { color: var(--text3); font-weight: 400; }
+.leg-cover-badge {
+  display: inline-flex; align-items: center; gap: 2px;
+  font-size: 10px; font-weight: 600;
+  color: #3b82f6;
+  background: color-mix(in srgb, #3b82f6 10%, transparent);
+  border-radius: 3px;
+  padding: 1px 5px;
+}
 .leg-rationale {
   font-size: 11px; color: var(--text2); margin-top: 4px; line-height: 1.5;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
@@ -1207,7 +1540,7 @@ onUnmounted(() => {
 
 .leg-pick-col { min-width: 36px; flex-shrink: 0; display: flex; flex-direction: column; align-items: center; gap: 3px; padding-top: 1px; }
 .leg-pick { font-size: 11px; font-weight: 700; padding: 3px 7px; border-radius: 4px; white-space: nowrap; }
-.leg-pick-code { font-size: 11px; font-weight: 700; color: var(--text3); }
+.leg-hhad-row { display: flex; align-items: center; gap: 3px; }
 .leg-hhad-badge { font-size: 9px; font-weight: 700; padding: 1px 4px; border-radius: 3px; background: var(--draw-bg); color: var(--draw-c); letter-spacing: .3px; }
 .leg-handicap { font-size: 10px; color: var(--draw-c); font-weight: 600; }
 
@@ -1378,6 +1711,22 @@ onUnmounted(() => {
 .log-icon-btn:hover { color: var(--primary); border-color: var(--primary); }
 .log-icon-btn.active { color: var(--primary); background: var(--primary-d); border-color: var(--primary); }
 
+/* ── LLM token usage bar ─────────────────────────────────────── */
+.llm-usage-bar {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text3);
+  background: var(--card);
+  border: var(--card-bd);
+  border-radius: 6px;
+  padding: 6px 10px;
+}
+.llm-usage-bar svg { flex-shrink: 0; color: var(--accent); }
+.usage-split { color: var(--text3); opacity: .75; }
+.usage-calls { color: var(--text3); opacity: .75; }
+
 /* ── Step log dropdown ───────────────────────────────────────── */
 .step-log-dropdown {
   background: var(--card);
@@ -1433,5 +1782,71 @@ onUnmounted(() => {
 .stat-stake-input:focus { border-color: var(--primary); }
 .stat-stake-input::-webkit-outer-spin-button,
 .stat-stake-input::-webkit-inner-spin-button { -webkit-appearance: none; }
+
+/* ── AI global structure rationale ─────────────────────────── */
+.ai-structure-rationale {
+  margin: 8px 0 4px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--primary) 6%, transparent);
+  border: 1px solid color-mix(in srgb, var(--primary) 18%, transparent);
+  overflow: hidden;
+}
+.ai-str-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  cursor: pointer;
+  user-select: none;
+}
+.ai-str-label {
+  flex: 1;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  letter-spacing: .2px;
+  text-transform: uppercase;
+}
+.ai-str-chevron {
+  color: var(--text-muted);
+  transition: transform .2s;
+  flex-shrink: 0;
+}
+.ai-str-chevron.rotate-180 { transform: rotate(180deg); }
+.ai-str-body {
+  margin: 0;
+  padding: 0 10px 9px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+
+/* ── AI excluded matches banner ─────────────────────────────── */
+.ai-excluded-list {
+  margin: 6px 0 0;
+  border-left: 2px solid #facc15;
+  padding: 4px 0 4px 8px;
+}
+.ai-excluded-item {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 3px 0;
+}
+.ai-excluded-item + .ai-excluded-item {
+  border-top: 1px solid var(--line);
+  margin-top: 3px;
+  padding-top: 6px;
+}
+.ai-excluded-match {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.ai-excluded-reason {
+  font-size: 11px;
+  color: var(--text-muted);
+  opacity: .8;
+}
 
 </style>

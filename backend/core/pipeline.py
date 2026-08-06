@@ -16,7 +16,10 @@ import uuid
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from db.models import Match as MatchModel
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -171,7 +174,7 @@ class DailyPipeline:
 
             # 保存 DuckDB 快照
             try:
-                await self._save_snapshots(target_date, run_id)
+                await self._save_snapshots(target_date, run_id, session)
             except Exception as exc:
                 logger.warning("DuckDB 快照保存失败（不影响主流程）：%s", exc)
 
@@ -186,11 +189,10 @@ class DailyPipeline:
     async def analyze_single_match(
         self,
         session: AsyncSession,
-        match,
+        match: "MatchModel",
         llm_client: Optional[LLMClient],
         run_id: Optional[str] = None,
     ) -> MatchAnalysisResult:
-        """完整三层分析，可被 API 端点直接调用。"""
         if not run_id:
             run_id = str(uuid.uuid4())[:8]
 
@@ -247,7 +249,15 @@ class DailyPipeline:
     # ── Layer 1 ─────────────────────────────────────────────────────────────
 
     async def _layer1_stats(self, match) -> tuple[dict, dict]:
-        """Dixon-Coles + Elo + 海外赔率去水差 → 融合概率。"""
+        # scheduler 路径在 run() 中已选择；API 路径首次调用时从历史数据自动选择
+        if self._devig_method is None:
+            try:
+                snap = await self._get_snap()
+                hist = await snap.get_devig_historical(limit=60)
+                self._devig_method = select_devig_method(hist)
+            except Exception:
+                self._devig_method = "power"
+
         sources: dict[str, dict] = {}
         cal = await self._get_calibrator()
 
@@ -325,7 +335,6 @@ class DailyPipeline:
     async def _layer2_llm(
         self, match, fused_probs: dict, llm_client: LLMClient
     ) -> dict:
-        """Skills 注入 + LLM 分析 + 结构化 JSON 解析。"""
         league_lower = (match.league or "").lower()
         is_tournament = (match.is_tournament or False) or any(
             kw.lower() in league_lower for kw in TOURNAMENT_KEYWORDS
@@ -381,23 +390,24 @@ class DailyPipeline:
             return result
 
     async def _build_intel_package(self, match) -> dict:
-        """并发拉取所有可用情报源，组装情报包。单个来源失败静默跳过。"""
         import asyncio as _asyncio
-        tasks = {
-            "elo": _asyncio.create_task(self._fetch_elo(match)),
-            "form_home": _asyncio.create_task(self._fetch_recent_form(match.home_team, match.league, is_home=True)),
-            "form_away": _asyncio.create_task(self._fetch_recent_form(match.away_team, match.league, is_home=False)),
-            "h2h": _asyncio.create_task(self._fetch_h2h(match)),
-            "standings": _asyncio.create_task(self._fetch_standings(match)),
-            "injuries": _asyncio.create_task(self._fetch_injuries(match)),
-        }
+        keys = ["elo", "form_home", "form_away", "h2h", "standings", "injuries"]
+        raw = await _asyncio.gather(
+            self._fetch_elo(match),
+            self._fetch_recent_form(match.home_team, match.league, is_home=True),
+            self._fetch_recent_form(match.away_team, match.league, is_home=False),
+            self._fetch_h2h(match),
+            self._fetch_standings(match),
+            self._fetch_injuries(match),
+            return_exceptions=True,
+        )
         results = {}
-        for key, task in tasks.items():
-            try:
-                results[key] = await task
-            except Exception as exc:
-                logger.debug("情报拉取失败 [%s]: %s", key, exc)
+        for key, val in zip(keys, raw):
+            if isinstance(val, BaseException):
+                logger.debug("情报拉取失败 [%s]: %s", key, val)
                 results[key] = None
+            else:
+                results[key] = val
 
         intel: dict = {}
 
@@ -634,33 +644,27 @@ class DailyPipeline:
             self._snap = await asyncio.to_thread(SnapshotManager, db_path)
         return self._snap
 
-    async def _save_snapshots(self, target_date: date, run_id: str):
+    async def _save_snapshots(self, target_date: date, run_id: str, session: AsyncSession):
         from db.models import Match, Prediction
-        from db.session import AsyncSessionLocal
 
         snap = await self._get_snap()
-        session = AsyncSessionLocal()
-        try:
-            preds = await session.execute(
-                select(Prediction).where(Prediction.run_id == run_id)
-            )
-            for pred in preds.scalars():
-                match = await session.get(Match, pred.match_id)
-                if match:
-                    await snap.save_prediction(
-                        match_id=pred.match_id,
-                        run_id=run_id,
-                        kickoff_at=str(match.kickoff_at),
-                        stat_probs=pred.stat_probs or {},
-                        fused_probs=pred.fused_probs or pred.stat_probs or {},
-                        intel_summary=pred.intel_summary or "",
-                        risk_label=pred.risk_label or "",
-                        confidence=pred.confidence or 0.5,
-                        market_odds=match.sporttery_odds,  # 预测时刻赔率快照（ADR-006 CLV entry 价）
-                    )
-        finally:
-            await session.close()
-            snap.close()
+        preds = await session.execute(
+            select(Prediction).where(Prediction.run_id == run_id)
+        )
+        for pred in preds.scalars():
+            match = await session.get(Match, pred.match_id)
+            if match:
+                await snap.save_prediction(
+                    match_id=pred.match_id,
+                    run_id=run_id,
+                    kickoff_at=str(match.kickoff_at),
+                    stat_probs=pred.stat_probs or {},
+                    fused_probs=pred.fused_probs or pred.stat_probs or {},
+                    intel_summary=pred.intel_summary or "",
+                    risk_label=pred.risk_label or "",
+                    confidence=pred.confidence or 0.5,
+                    market_odds=match.sporttery_odds,  # ADR-006 CLV entry 价快照
+                )
 
     # ── 辅助 ─────────────────────────────────────────────────────────────────
 

@@ -11,15 +11,88 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from typing import Any
+
 from api.auth import get_current_user
+from api.predictions import _get_user_llm_client
 from config import get_settings
-from db.models import Match, Prediction, User
+from db.models import BetRecord, Match, Prediction, User
 from db.session import AsyncSessionLocal, get_db
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 MAX_AUTO_ANALYZE = 4
+
+
+async def _make_global_decision_safe(enriched_preds: list[dict], llm_client) -> object | None:
+    """全局决策调用，失败时降级返回 None（Python 规则接管）。"""
+    if llm_client is None:
+        return None
+    try:
+        from core.tickets.global_decision import make_global_decision
+        return await make_global_decision(enriched_preds, llm_client)
+    except Exception as e:
+        logger.warning("全局决策失败，降级 Python 规则: %s", e)
+        return None
+
+
+def _make_client_from_db_config(cfg):
+    """从 DBLLMConfig 创建 LLMClient。"""
+    from core.llm.client import LLMClient
+    from core.llm.client import LLMConfig as ClientLLMConfig
+    client = LLMClient(ClientLLMConfig(
+        provider=cfg.provider.value,
+        model=cfg.model,
+        api_key=cfg.api_key,
+        base_url=cfg.base_url,
+    ))
+    client.db_config_id = cfg.id
+    return client
+
+
+async def _resolve_directive(
+    enriched_preds: list[dict],
+    force: bool,
+    llm_configs: list,
+    db: AsyncSession,
+    user_id: int,
+) -> object | None:
+    client = (
+        _make_client_from_db_config(llm_configs[0])
+        if force and llm_configs
+        else await _get_user_llm_client(db, user_id)
+    )
+    return await _make_global_decision_safe(enriched_preds, client)
+
+
+def _merge_usage(base: dict | None, client_usage: dict | None) -> dict | None:
+    if not client_usage:
+        return base
+    if base is None:
+        base = {"prompt_tokens": 0, "completion_tokens": 0, "calls": 0}
+    base["prompt_tokens"] += client_usage.get("prompt_tokens", 0)
+    base["completion_tokens"] += client_usage.get("completion_tokens", 0)
+    base["calls"] += 1
+    return base
+
+
+async def _get_recent_roi(db: AsyncSession, user_id: int, n: int = 10) -> float | None:
+    result = await db.execute(
+        select(BetRecord)
+        .where(BetRecord.user_id == user_id)
+        .where(BetRecord.status.in_(["won", "lost"]))
+        .order_by(BetRecord.bet_at.desc())
+        .limit(n)
+    )
+    records = result.scalars().all()
+    if not records:
+        return None
+    total_stake = sum(r.stake for r in records)
+    total_payout = sum((r.payout or 0.0) for r in records)
+    if total_stake <= 0:
+        return None
+    return (total_payout - total_stake) / total_stake
 
 # ── Redis client（懒初始化，复用连接池） ──────────────────────────────────────
 
@@ -114,6 +187,8 @@ async def generate_tickets(
     pipeline = DailyPipeline()
     budget = req.effective_budget
     enriched_preds: list[dict] = []
+    llm_usage: dict | None = None
+    llm_configs: list = []
 
     if req.force:
         # ── 强制多角色 Ensemble ────────────────────────────────────────────────
@@ -191,7 +266,6 @@ async def generate_tickets(
                     status_code=422,
                     detail=f"所选 {len(missing_ids)} 场赛事尚未分析。请先在赛事页触发分析，或每次最多选 {MAX_AUTO_ANALYZE} 场自动分析",
                 )
-            from api.predictions import _get_user_llm_client
             llm_client = await _get_user_llm_client(db, current_user.id)
             if not llm_client:
                 raise HTTPException(status_code=400, detail="请先在设置页配置 LLM，再生成投注方案")
@@ -201,6 +275,7 @@ async def generate_tickets(
                     continue
                 try:
                     ar = await pipeline.analyze_single_match(db, match, llm_client)
+                    llm_usage = _merge_usage(llm_usage, llm_client.last_usage)
                     pred = Prediction(
                         match_id=ar.match_id, run_id=ar.run_id,
                         user_id=current_user.id,
@@ -223,13 +298,17 @@ async def generate_tickets(
     if not enriched_preds:
         raise HTTPException(status_code=422, detail="所选赛事均无法完成分析，请检查 LLM 配置或稍后重试")
 
+    directive = await _resolve_directive(enriched_preds, req.force, llm_configs, db, current_user.id)
+
+    recent_roi = await _get_recent_roi(db, current_user.id)
     generator = TicketGenerator()
     plans = generator.generate_parlay_plans(
-        enriched_preds, budget=budget, multiplier=req.effective_multiplier
+        enriched_preds, budget=budget, multiplier=req.effective_multiplier,
+        recent_roi=recent_roi, directive=directive,
     )
     if not plans:
         raise HTTPException(status_code=422, detail=_empty_plans_reason(enriched_preds))
-    return _build_schemes(plans, enriched_preds)
+    return _build_schemes(plans, enriched_preds, llm_usage=llm_usage)
 
 
 # ── SSE 流式生成 ──────────────────────────────────────────────────────────────
@@ -258,6 +337,8 @@ async def stream_tickets(
 
                 pipeline = DailyPipeline()
                 enriched_preds: list[dict] = []
+                llm_usage: dict | None = None
+                llm_configs: list = []
 
                 if force:
                     # ── 强制多角色 Ensemble ────────────────────────────────────
@@ -358,7 +439,6 @@ async def stream_tickets(
                             )
                             return
 
-                        from api.predictions import _get_user_llm_client
                         llm_client = await _get_user_llm_client(db, user_id)
                         if not llm_client:
                             yield _sse("error", msg="请先在设置页配置 LLM，再生成投注方案")
@@ -383,6 +463,7 @@ async def stream_tickets(
                             )
                             try:
                                 ar = await pipeline.analyze_single_match(db, match, llm_client)
+                                llm_usage = _merge_usage(llm_usage, llm_client.last_usage)
                                 pred = Prediction(
                                     match_id=ar.match_id, run_id=ar.run_id,
                                     user_id=user_id,
@@ -432,17 +513,22 @@ async def stream_tickets(
 
                 avg_conf_pct = round(avg_conf / max(n_with_conf, 1) * 100)
                 votes_info = f"，多角色投票 {total_votes} 条" if total_votes > 0 else ""
+                yield _sse("step", step="global_decision", msg="AI 全局方案结构决策…", index=2, total=5)
+                directive = await _resolve_directive(enriched_preds, force, llm_configs, db, user_id)
+
                 yield _sse(
                     "step", step="model",
                     msg=f"融合 {len(enriched_preds)} 场概率，平均置信度 {avg_conf_pct}%{votes_info}…",
-                    index=2, total=4,
+                    index=3, total=5,
                 )
 
-                yield _sse("step", step="ticket", msg="筛选票型 & 分配资金…", index=3, total=4)
+                yield _sse("step", step="ticket", msg="筛选票型 & 分配资金…", index=4, total=5)
 
+                recent_roi = await _get_recent_roi(db, user_id)
                 gen = TicketGenerator()
                 plans = gen.generate_parlay_plans(
-                    enriched_preds, budget=budget, multiplier=multiplier
+                    enriched_preds, budget=budget, multiplier=multiplier,
+                    recent_roi=recent_roi, directive=directive,
                 )
 
                 if not plans:
@@ -454,7 +540,7 @@ async def stream_tickets(
                     "high_odds": "博高赔", "scoreline": "比分",
                 }
                 plan_summary = "·".join(_PLAN_LABELS.get(p.plan_id, p.plan_id) for p in plans)
-                schemes = _build_schemes(plans, enriched_preds)
+                schemes = _build_schemes(plans, enriched_preds, llm_usage=llm_usage)
                 yield _sse("done", schemes=schemes, summary=f"生成 {len(plans)} 套方案：{plan_summary}")
 
             except Exception as exc:
@@ -554,6 +640,8 @@ async def _run_ticket_task(task_id: str, req: TicketsRequest, user_id: int) -> N
 
             pipeline = DailyPipeline()
             enriched_preds: list[dict] = []
+            llm_usage: dict | None = None
+            llm_configs: list = []
 
             if force:
                 await push("step", step="check", msg="启动多角色评估，读取模型配置…", index=0, total=4)
@@ -654,7 +742,6 @@ async def _run_ticket_task(task_id: str, req: TicketsRequest, user_id: int) -> N
                         await r.set(f"{prefix}:status", "error", ex=TTL)
                         return
 
-                    from api.predictions import _get_user_llm_client
                     llm_client = await _get_user_llm_client(db, user_id)
                     if not llm_client:
                         await push("error", msg="请先在设置页配置 LLM，再生成投注方案")
@@ -680,6 +767,7 @@ async def _run_ticket_task(task_id: str, req: TicketsRequest, user_id: int) -> N
                         )
                         try:
                             ar = await pipeline.analyze_single_match(db, match, llm_client)
+                            llm_usage = _merge_usage(llm_usage, llm_client.last_usage)
                             pred = Prediction(
                                 match_id=ar.match_id, run_id=ar.run_id,
                                 user_id=user_id,
@@ -729,17 +817,22 @@ async def _run_ticket_task(task_id: str, req: TicketsRequest, user_id: int) -> N
 
             avg_conf_pct = round(avg_conf / max(n_with_conf, 1) * 100)
             votes_info = f"，多角色投票 {total_votes} 条" if total_votes > 0 else ""
+            await push("step", step="global_decision", msg="AI 全局方案结构决策…", index=2, total=5)
+            directive = await _resolve_directive(enriched_preds, force, llm_configs, db, user_id)
+
             await push(
                 "step", step="model",
                 msg=f"融合 {len(enriched_preds)} 场概率，平均置信度 {avg_conf_pct}%{votes_info}…",
-                index=2, total=4,
+                index=3, total=5,
             )
 
-            await push("step", step="ticket", msg="筛选票型 & 分配资金…", index=3, total=4)
+            await push("step", step="ticket", msg="筛选票型 & 分配资金…", index=4, total=5)
 
+            recent_roi = await _get_recent_roi(db, user_id)
             gen = TicketGenerator()
             plans = gen.generate_parlay_plans(
-                enriched_preds, budget=budget, multiplier=multiplier
+                enriched_preds, budget=budget, multiplier=multiplier,
+                recent_roi=recent_roi, directive=directive,
             )
 
             if not plans:
@@ -752,7 +845,7 @@ async def _run_ticket_task(task_id: str, req: TicketsRequest, user_id: int) -> N
                 "high_odds": "博高赔", "scoreline": "比分",
             }
             plan_summary = "·".join(_PLAN_LABELS.get(p.plan_id, p.plan_id) for p in plans)
-            schemes = _build_schemes(plans, enriched_preds)
+            schemes = _build_schemes(plans, enriched_preds, llm_usage=llm_usage)
             await push("done", summary=f"生成 {len(plans)} 套方案：{plan_summary}")
             pipe = r.pipeline()
             pipe.set(f"{prefix}:result", json.dumps(schemes), ex=TTL)
@@ -768,7 +861,7 @@ async def _run_ticket_task(task_id: str, req: TicketsRequest, user_id: int) -> N
 
 # ── 构建方案响应 ──────────────────────────────────────────────────────────────
 
-def _build_schemes(plans, enriched_preds) -> dict:
+def _build_schemes(plans: list[Any], enriched_preds: list[dict], llm_usage: dict | None = None) -> dict:
     mid_to_league: dict[int, str] = {
         ep["match"].id: (ep["match"].league or "")
         for ep in enriched_preds
@@ -784,6 +877,7 @@ def _build_schemes(plans, enriched_preds) -> dict:
             leg_d["rationale"] = ""
             legs_out.append(leg_d)
 
+        is_cover = plan.combo_sizes is not None
         schemes[plan.plan_id] = {
             "name":              plan.name,
             "tag":               plan.tag,
@@ -797,13 +891,18 @@ def _build_schemes(plans, enriched_preds) -> dict:
             "stake":             plan.total_stake,
             "win_probability":   plan.win_probability,
             "theoretical_prize": plan.theoretical_prize,
+            # 容错方案：理论最高奖金（全腿命中）按单倍归一，前端乘以用户倍数动态重算
+            "max_unit_prize":    round(plan.theoretical_prize / max(plan.multiplier, 1), 1) if is_cover else None,
             "risk_label":        _risk_label_for(plan.plan_id),
+            "ai_rationale":      plan.ai_rationale or None,
+            "ai_excluded":       plan.ai_excluded or [],
         }
 
     if "scoreline" not in schemes:
         schemes["scoreline"] = {"legs": [], "stake": 0, "note": "比分票型请在单场详情页查看"}
 
     schemes["stake_allocation"] = {p.plan_id: p.total_stake for p in plans}
+    schemes["llm_usage"] = llm_usage
     return schemes
 
 
